@@ -83,9 +83,13 @@ export const MODELS = [
   { id: 'claude-3.5-haiku', company: 'anthropic', name: 'Claude 3.5 Haiku', apiModel: 'claude-3-5-haiku-20241022', tagline: 'Fastest Claude', price: { in: 0.8, out: 4.0 }, vision: true, pdf: true },
 
   // --- Google ---
-  { id: 'gemini-2.5-pro', company: 'google', name: 'Gemini 2.5 Pro', apiModel: 'gemini-2.5-pro', tagline: 'Top reasoning, long context', price: { in: 1.25, out: 10.0 }, vision: true, pdf: true },
-  { id: 'gemini-2.5-flash', company: 'google', name: 'Gemini 2.5 Flash', apiModel: 'gemini-2.5-flash', tagline: 'Fast, great value', price: { in: 0.3, out: 2.5 }, vision: true, pdf: true },
-  { id: 'gemini-2.0-flash', company: 'google', name: 'Gemini 2.0 Flash', apiModel: 'gemini-2.0-flash', tagline: 'Previous-gen speedster', price: { in: 0.1, out: 0.4 }, vision: true, pdf: true },
+  // Gemini 2.x is gone: 2.5-flash 404s ("no longer available to new users") and
+  // 2.0-flash / 2.5-pro return 429 with `limit: 0` — no free-tier quota is allocated
+  // for them any more. Pro-class models have no free tier at all, so they are omitted
+  // here; add gemini-3.1-pro-preview ($2/$12) only once billing is enabled.
+  { id: 'gemini-3.6-flash', company: 'google', name: 'Gemini 3.6 Flash', apiModel: 'gemini-3.6-flash', tagline: 'Flagship Flash', price: { in: 1.5, out: 7.5 }, vision: true, pdf: true },
+  { id: 'gemini-3.5-flash-lite', company: 'google', name: 'Gemini 3.5 Flash-Lite', apiModel: 'gemini-3.5-flash-lite', tagline: 'Fast, great value', price: { in: 0.3, out: 2.5 }, vision: true, pdf: true },
+  { id: 'gemini-3.1-flash-lite', company: 'google', name: 'Gemini 3.1 Flash-Lite', apiModel: 'gemini-3.1-flash-lite', tagline: 'Cheapest Gemini', price: { in: 0.25, out: 1.5 }, vision: true, pdf: true },
 
   // --- Moonshot AI (Kimi) ---
   { id: 'kimi-k3', company: 'moonshot', name: 'Kimi K3', apiModel: 'kimi-k3', tagline: 'Flagship, 1M context', price: { in: 3.0, out: 15.0 }, vision: true, pdf: false },
