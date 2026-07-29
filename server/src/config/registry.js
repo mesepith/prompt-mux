@@ -87,9 +87,12 @@ export const MODELS = [
   // 2.0-flash / 2.5-pro return 429 with `limit: 0` — no free-tier quota is allocated
   // for them any more. Pro-class models have no free tier at all, so they are omitted
   // here; add gemini-3.1-pro-preview ($2/$12) only once billing is enabled.
+  // gemini-3.5-flash-lite is deliberately absent: its stream hangs forever under the
+  // deprecated @google/generative-ai SDK roughly 2 out of 3 calls (verified 2026-07-29).
+  // Nothing throws, so the request never resolves and the UI spins until nginx times
+  // out. Re-add it once this provider is migrated to the current @google/genai SDK.
   { id: 'gemini-3.6-flash', company: 'google', name: 'Gemini 3.6 Flash', apiModel: 'gemini-3.6-flash', tagline: 'Flagship Flash', price: { in: 1.5, out: 7.5 }, vision: true, pdf: true },
-  { id: 'gemini-3.5-flash-lite', company: 'google', name: 'Gemini 3.5 Flash-Lite', apiModel: 'gemini-3.5-flash-lite', tagline: 'Fast, great value', price: { in: 0.3, out: 2.5 }, vision: true, pdf: true },
-  { id: 'gemini-3.1-flash-lite', company: 'google', name: 'Gemini 3.1 Flash-Lite', apiModel: 'gemini-3.1-flash-lite', tagline: 'Cheapest Gemini', price: { in: 0.25, out: 1.5 }, vision: true, pdf: true },
+  { id: 'gemini-3.1-flash-lite', company: 'google', name: 'Gemini 3.1 Flash-Lite', apiModel: 'gemini-3.1-flash-lite', tagline: 'Fast and cheapest', price: { in: 0.25, out: 1.5 }, vision: true, pdf: true },
 
   // --- Moonshot AI (Kimi) ---
   { id: 'kimi-k3', company: 'moonshot', name: 'Kimi K3', apiModel: 'kimi-k3', tagline: 'Flagship, 1M context', price: { in: 3.0, out: 15.0 }, vision: true, pdf: false },
