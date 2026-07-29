@@ -1,0 +1,129 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-surface-950 text-zinc-100 antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+}
+
+::selection {
+  @apply bg-indigo-500/40;
+}
+
+/* ---- scrollbars ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-zinc-700/70;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- gradient text ---- */
+.text-gradient {
+  @apply bg-gradient-to-r from-violet-400 via-indigo-400 to-sky-400 bg-clip-text text-transparent;
+}
+
+/* ---- streaming cursor ---- */
+.stream-cursor::after {
+  content: '▍';
+  @apply ml-0.5 inline-block animate-pulse text-indigo-400;
+}
+
+/* ---- markdown ---- */
+.md {
+  @apply text-[15px] leading-7 text-zinc-200;
+}
+.md > *:first-child {
+  margin-top: 0;
+}
+.md > *:last-child {
+  margin-bottom: 0;
+}
+.md p {
+  @apply my-3;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  @apply mb-2 mt-6 font-semibold text-zinc-50;
+}
+.md h1 {
+  @apply text-2xl;
+}
+.md h2 {
+  @apply text-xl;
+}
+.md h3 {
+  @apply text-lg;
+}
+.md ul {
+  @apply my-3 list-disc space-y-1.5 pl-6;
+}
+.md ol {
+  @apply my-3 list-decimal space-y-1.5 pl-6;
+}
+.md a {
+  @apply text-indigo-400 underline decoration-indigo-400/40 underline-offset-2 hover:text-indigo-300;
+}
+.md blockquote {
+  @apply my-3 border-l-2 border-indigo-500/50 pl-4 text-zinc-400;
+}
+.md hr {
+  @apply my-6 border-white/10;
+}
+.md table {
+  @apply my-4 w-full border-collapse overflow-hidden rounded-lg text-sm;
+}
+.md th {
+  @apply border border-white/10 bg-white/5 px-3 py-2 text-left font-semibold text-zinc-100;
+}
+.md td {
+  @apply border border-white/10 px-3 py-2;
+}
+.md code:not(pre code) {
+  @apply rounded-md bg-white/10 px-1.5 py-0.5 font-mono text-[13px] text-indigo-300;
+}
+.md pre {
+  @apply m-0 overflow-x-auto p-4 font-mono text-[13px] leading-6;
+}
+
+/* hljs theme overrides — blend with our code block chrome */
+.md pre .hljs {
+  background: transparent;
+  color: #e4e4e7;
+}
+
+/* ---- code block chrome (rendered by Markdown.jsx) ---- */
+.codeblock {
+  @apply my-4 overflow-hidden rounded-xl border border-white/10 bg-[#0d0d12];
+}
+.codeblock-header {
+  @apply flex items-center justify-between border-b border-white/10 bg-white/[0.03] px-4 py-2;
+}
+.codeblock-lang {
+  @apply font-mono text-xs uppercase tracking-wider text-zinc-500;
+}
+.codeblock-copy {
+  @apply flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200;
+}
