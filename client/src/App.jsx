@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Check, PanelLeft, Pencil, X, Zap } from 'lucide-react';
+import { Check, Link2, PanelLeft, Pencil, X, Zap } from 'lucide-react';
+import clsx from 'clsx';
 import { useStore } from './store/useStore.js';
 import { formatCost, formatTokens, messageCost } from './lib/usage.js';
+import { onRouteChange, shareUrl } from './lib/router.js';
+import { copyToClipboard } from './lib/clipboard.js';
 import Sidebar from './components/Sidebar.jsx';
 import MessageList from './components/MessageList.jsx';
 import Composer from './components/Composer.jsx';
@@ -30,7 +33,7 @@ function SessionUsage() {
   if (!total) return null;
   return (
     <div
-      className="ml-auto flex cursor-default items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.03] px-3 py-1.5 text-[11px] font-medium tabular-nums text-zinc-400"
+      className="flex cursor-default items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.03] px-3 py-1.5 text-[11px] font-medium tabular-nums text-zinc-400"
       title={`This chat: ${input.toLocaleString()} in + ${output.toLocaleString()} out${
         priced ? ` · est. ${formatCost(cost)}` : ''
       }`}
@@ -39,6 +42,56 @@ function SessionUsage() {
       {formatTokens(total)} tok
       {priced && <span className="border-l border-white/10 pl-1.5 font-semibold text-emerald-400/90">{formatCost(cost)}</span>}
     </div>
+  );
+}
+
+// Every saved chat lives at /c/<id> — this copies that link for sharing or
+// bookmarking. The address bar already shows it; this is the one-click version.
+function ShareLink() {
+  const currentId = useStore((s) => s.currentId);
+  const [state, setState] = useState('idle'); // idle | copied | failed
+
+  // "Copied" is transient feedback; "failed" sticks around because it exposes
+  // the URL for manual copying (some browsers block clipboard writes).
+  useEffect(() => {
+    if (state !== 'copied') return undefined;
+    const timer = setTimeout(() => setState('idle'), 2000);
+    return () => clearTimeout(timer);
+  }, [state]);
+
+  useEffect(() => setState('idle'), [currentId]);
+
+  if (!currentId) return null;
+  const url = shareUrl(currentId);
+
+  return (
+    <>
+      {state === 'failed' && (
+        <input
+          readOnly
+          autoFocus
+          value={url}
+          onFocus={(e) => e.target.select()}
+          className="w-64 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 outline-none"
+        />
+      )}
+      <button
+        type="button"
+        onClick={async () => setState((await copyToClipboard(url)) ? 'copied' : 'failed')}
+        title={state === 'failed' ? `Copy it manually: ${url}` : `Copy link to this chat\n${url}`}
+        className={clsx(
+          'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
+          state === 'copied'
+            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+            : state === 'failed'
+              ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+              : 'border-white/[0.07] bg-white/[0.03] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200'
+        )}
+      >
+        {state === 'copied' ? <Check size={12} /> : <Link2 size={12} />}
+        {state === 'copied' ? 'Link copied' : state === 'failed' ? 'Copy manually' : 'Share link'}
+      </button>
+    </>
   );
 }
 
@@ -103,7 +156,10 @@ function TopBar() {
         <span className="text-sm text-zinc-500">New conversation</span>
       )}
 
-      <SessionUsage />
+      <div className="ml-auto flex items-center gap-2">
+        <ShareLink />
+        <SessionUsage />
+      </div>
     </header>
   );
 }
@@ -122,10 +178,16 @@ function Splash() {
 export default function App() {
   const { bootstrap, booted, bootError, messages, activeArtifact } = useStore();
   const activeAttachment = useStore((s) => s.activeAttachment);
+  const linkError = useStore((s) => s.linkError);
+  const dismissLinkError = useStore((s) => s.dismissLinkError);
+  const handleRouteChange = useStore((s) => s.handleRouteChange);
 
   useEffect(() => {
     bootstrap();
   }, [bootstrap]);
+
+  // Browser Back/Forward between chats.
+  useEffect(() => onRouteChange(handleRouteChange), [handleRouteChange]);
 
   if (!booted) return <Splash />;
 
@@ -137,6 +199,19 @@ export default function App() {
         {bootError && (
           <div className="border-b border-rose-500/20 bg-rose-500/10 px-4 py-2 text-center text-xs text-rose-300">
             {bootError} — is the server running on port 5050?
+          </div>
+        )}
+        {linkError && (
+          <div className="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
+            <span className="flex-1 text-center">{linkError}</span>
+            <button
+              type="button"
+              onClick={dismissLinkError}
+              title="Dismiss"
+              className="rounded p-0.5 text-amber-300/70 hover:text-amber-200"
+            >
+              <X size={13} />
+            </button>
           </div>
         )}
         <div className="relative flex min-h-0 flex-1">

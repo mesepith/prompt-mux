@@ -1,9 +1,16 @@
+import { annotateHtml } from './htmlNodes.js';
+import { PICKER_SCRIPT } from './pickerScript.js';
+
 /**
  * Artifact helpers. An "artifact" is a fenced ```html or ```svg block in an
  * assistant message; the UI renders it live in a sandboxed preview panel
  * (Claude-Artifacts style).
+ *
+ * `messageId` + `index` identify where the code lives in the database, which is
+ * what point-and-edit needs to splice a targeted change back into it. Keep the
+ * fence regex in sync with server/src/lib/artifacts.js.
  */
-export function extractArtifacts(content) {
+export function extractArtifacts(content, messageId = null) {
   const artifacts = [];
   if (!content) return artifacts;
   const re = /```(html|svg)\s*\n([\s\S]*?)(?:```|$)/g;
@@ -15,6 +22,8 @@ export function extractArtifacts(content) {
       language: match[1],
       code,
       title: deriveTitle(match[1], code),
+      messageId,
+      index: artifacts.length,
     });
   }
   return artifacts;
@@ -28,21 +37,39 @@ function deriveTitle(language, code) {
   return language === 'svg' ? 'vector.svg' : 'index.html';
 }
 
-/** Builds the full document loaded into the sandboxed preview iframe. */
-export function buildPreviewDoc(artifact) {
+/**
+ * Builds the full document loaded into the sandboxed preview iframe.
+ *
+ * With `{ picker: true }` the artifact code is stamped with data-pm-node
+ * attributes and the point-and-edit runtime is injected, so clicks in the
+ * preview can be mapped back to exact source ranges. The stamping happens on
+ * `artifact.code` only (never on the wrapper below), so the ids line up with
+ * the code the server has stored — that's what makes the splice safe.
+ */
+export function buildPreviewDoc(artifact, { picker = false } = {}) {
   if (!artifact) return '';
+  const code = picker ? annotateHtml(artifact.code) : artifact.code;
+  const runtime = picker ? `<script>${PICKER_SCRIPT}</script>` : '';
+
   if (artifact.language === 'svg') {
     return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
   body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fff; }
   svg { max-width: 96vw; max-height: 96vh; }
-</style></head><body>${artifact.code}</body></html>`;
+</style></head><body>${code}${runtime}</body></html>`;
   }
-  if (/^\s*(<!DOCTYPE|<html)/i.test(artifact.code)) return artifact.code;
+  if (/^\s*(<!DOCTYPE|<html)/i.test(artifact.code)) {
+    if (!runtime) return code;
+    // Inject at the very end of the body so the runtime sees the full DOM.
+    const closeBody = code.toLowerCase().lastIndexOf('</body>');
+    return closeBody === -1
+      ? `${code}${runtime}`
+      : `${code.slice(0, closeBody)}${runtime}${code.slice(closeBody)}`;
+  }
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 16px; }</style>
-</head><body>${artifact.code}</body></html>`;
+</head><body>${code}${runtime}</body></html>`;
 }
 
 export function openArtifactInNewTab(artifact) {

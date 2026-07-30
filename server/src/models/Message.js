@@ -44,6 +44,15 @@ const messageSchema = new mongoose.Schema(
     },
     // Set when generation failed (bad API key, rate limit, ...).
     error: { type: String },
+    // Set on the message pair produced by point-and-edit (POST /artifact-edit):
+    // the user's instruction, the element it targeted, and the message whose
+    // artifact was edited. Used to badge the pair in the UI and to trim older
+    // copies of the same artifact out of provider history.
+    artifactEdit: {
+      instruction: { type: String },
+      target: { type: String },
+      sourceMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
+    },
   },
   { timestamps: true }
 );

@@ -1,4 +1,4 @@
-import { AlertTriangle, FileText, FileType, Play } from 'lucide-react';
+import { AlertTriangle, FileText, FileType, MousePointerClick, Play } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store/useStore.js';
 import { extractArtifacts } from '../lib/artifacts.js';
@@ -126,10 +126,18 @@ export default function MessageBubble({ message, isStreaming = false }) {
     );
   }
 
-  const artifacts = isStreaming ? [] : extractArtifacts(message.content);
+  const artifacts = isStreaming ? [] : extractArtifacts(message.content, message._id);
+  const edit = message.artifactEdit?.instruction ? message.artifactEdit : null;
 
   return (
     <div className="animate-fade-in">
+      {edit && (
+        <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-violet-400/25 bg-violet-500/[0.08] px-2.5 py-1 text-[11px] font-medium text-violet-300">
+          <MousePointerClick size={11} />
+          Targeted edit
+          {edit.target && <code className="font-mono text-violet-200/80">{edit.target}</code>}
+        </div>
+      )}
       {message.error ? (
         <div className="flex items-start gap-2.5 rounded-xl border border-rose-500/25 bg-rose-500/[0.07] px-4 py-3">
           <AlertTriangle size={16} className="mt-0.5 shrink-0 text-rose-400" />

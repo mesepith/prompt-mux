@@ -15,8 +15,10 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
 - `npm run build` — production client build to `client/dist`
 - `npm start` — production mode: Express serves API + built client on :5050
 - Syntax check server: `cd server && node --check src/<file>.js`
-- No test suite yet — verify changes by running the server and curling endpoints
-  (see "Verifying" below).
+- `npm --prefix client test` / `npm --prefix server test` — `node --test` unit tests for the
+  pure logic that point-and-edit depends on (HTML source scanner, edit-reply sanitizer).
+  There is no broader suite: verify everything else by running the server and curling
+  endpoints (see "Verifying" below).
 
 ## Architecture rules (keep it this way)
 
@@ -59,8 +61,47 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   Server nudges models to produce them via `config/systemPrompt.js`; client extracts
   them in `client/src/lib/artifacts.js` and previews in a sandboxed iframe
   (`sandbox="allow-scripts"` — do not loosen this).
+- **Point & edit** (surgical artifact editing) — the one invariant: *the model rewrites a
+  fragment, the server splices it; nobody regenerates the document*.
+  - `client/src/lib/htmlNodes.js` scans artifact source into elements with exact
+    `[start, end)` offsets and `annotateHtml()` stamps `data-pm-node="<id>"` (id = index in
+    that scan) into a **preview-only** copy. Never annotate what you store or splice, and
+    never let the two scans diverge — the id→range mapping is the whole mechanism.
+    It's covered by `client/src/lib/htmlNodes.test.js` (`npm --prefix client test`); add a
+    case there for any parsing change.
+    The scanner must agree with the *browser's* parse, because that's what the user
+    clicked — in particular the optional-end-tag rules (`<ul><li><p>a<li>` makes two
+    sibling `li`s, a table section closes an open `<caption>`) and the rule that a quote
+    only delimits an attribute value when it follows `=`. When changing it, re-run the
+    ground-truth check: annotate a sample, load it in an iframe, and assert every
+    `[data-pm-node]` element's tag and nearest annotated ancestor match the scan.
+  - `client/src/lib/pickerScript.js` is injected into the preview and reports the clicked
+    id over postMessage. The sandbox has an opaque origin, so both sides authenticate by
+    window identity (`event.source === iframe.contentWindow` in the panel,
+    `event.source === window.parent` in the frame) — `event.origin` is `"null"` and must
+    not be trusted. Message shapes are documented at the top of both files; keep them in sync.
+  - `POST /api/conversations/:id/artifact-edit` re-extracts the artifact server-side and
+    **refuses the edit unless `code.slice(start, end) === snippet`** — that check is what
+    stops a stale selection from clobbering unrelated markup. Keep the fence regex in
+    `server/src/lib/artifacts.js` identical to the client's.
+  - Model output goes through `cleanFragment()` (`server/src/config/editPrompt.js`), which
+    unwraps fences/prose and **rejects a whole-document reply**. Covered by
+    `server/src/config/editPrompt.test.js` (`npm --prefix server test`).
+  - Each edit is persisted as a user+assistant pair carrying `artifactEdit` metadata, so
+    reloads, history and the artifact panel all keep working with no special cases. Older
+    edit copies are summarized out of provider history (`keepFullFrom` in the messages
+    route) so a long editing session doesn't resend the same document every turn.
+  - `providers/demo.js#editFragment` is the offline stand-in (deterministic outline +
+    `data-demo-edit`), so the flow is testable with no API keys. It is not a model call.
 - **State**: single Zustand store (`client/src/store/useStore.js`). No prop-drilling
   of chat state; components read/write the store.
+- **Routing**: hand-rolled, no router library — `client/src/lib/router.js` owns the two
+  URL shapes (`/` = new chat, `/c/<id>` = a conversation) and the History API calls.
+  The store drives it: `selectConversation`/`newChat` push, first send of a new chat
+  `replace`s `/` with its permanent link, and `handleRouteChange` (wired to `popstate`
+  in `App.jsx`) mirrors Back/Forward. Pass `{ updateUrl: false }` when the URL is
+  already the source of truth. A `/c/<id>` that 404s clears to `/` and sets
+  `linkError`. Deep links rely on the SPA fallback in `server/src/index.js` — keep it.
 - **Styling**: Tailwind only, dark theme via the `surface-*` palette defined in
   `client/tailwind.config.js` + custom classes in `client/src/index.css`. No CSS files
   per component.
@@ -91,7 +132,25 @@ curl -s -X POST localhost:5050/api/conversations \
   -H 'Content-Type: application/json' -d '{"modelId":"demo-artist"}'
 curl -N -X POST localhost:5050/api/conversations/<id>/messages \
   -H 'Content-Type: application/json' -d '{"content":"hi"}'   # expect SSE stream
+npm --prefix client test && npm --prefix server test          # unit tests pass
 cd client && npm run build                    # client compiles
+```
+
+Point & edit, end to end with no keys (`demo-artist` streams an artifact offline):
+
+```bash
+# 1. grab the assistant message id + its artifact code from the SSE 'done' frame above
+# 2. find an element's offsets with the same scanner the UI uses
+node --input-type=module -e "
+  import { scanHtmlNodes } from './client/src/lib/htmlNodes.js';
+  const code = process.env.CODE; const n = scanHtmlNodes(code).find(x => x.tag === 'h1');
+  console.log(JSON.stringify({ start: n.start, end: n.end, snippet: code.slice(n.start, n.end) }));
+"
+# 3. POST the edit and diff the returned artifact against the old one — everything outside
+#    [start,end) must be byte-identical
+curl -s -X POST localhost:5050/api/conversations/<id>/artifact-edit \
+  -H 'Content-Type: application/json' \
+  -d '{"messageId":"<msg>","artifactIndex":0,"start":..,"end":..,"snippet":"..","instruction":"make it bigger"}'
 ```
 
 The `demo-artist` model streams offline (no keys needed) — use it for end-to-end checks.

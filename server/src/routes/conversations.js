@@ -1,9 +1,13 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import { Conversation } from '../models/Conversation.js';
 import { Message } from '../models/Message.js';
 import { getModel, getCompany, isCompanyAvailable } from '../config/registry.js';
 import { SYSTEM_PROMPT } from '../config/systemPrompt.js';
+import { EDIT_SYSTEM_PROMPT, buildEditPrompt, cleanFragment, rootTag } from '../config/editPrompt.js';
 import { streamChat, describeImages } from '../providers/index.js';
+import { editFragment as demoEditFragment } from '../providers/demo.js';
+import { extractArtifacts, artifactFence, summarizeArtifactFences } from '../lib/artifacts.js';
 import { validateImageDataUrl, MAX_IMAGES } from '../lib/images.js';
 import { renderPdfPagesToImages } from '../lib/pdfImages.js';
 import {
@@ -56,8 +60,11 @@ router.post('/', async (req, res, next) => {
 });
 
 // GET /api/conversations/:id — conversation with full message history.
+// Shared/bookmarked links can be stale or mistyped, so a bad id is a 404, not a 500.
 router.get('/:id', async (req, res, next) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ error: 'Conversation not found' });
     const conversation = await Conversation.findById(req.params.id).lean();
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
     const messages = await Message.find({ conversationId: conversation._id })
@@ -101,6 +108,147 @@ router.delete('/:id', async (req, res, next) => {
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
     await Message.deleteMany({ conversationId: conversation._id });
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/conversations/:id/artifact-edit — surgical, point-and-click artifact editing.
+ *
+ * Body: { messageId, artifactIndex, start, end, snippet, instruction, targetLabel?, modelId? }
+ *
+ * The client picked one element in the sandboxed preview and knows its exact
+ * character range in the stored artifact code (see client/src/lib/htmlNodes.js).
+ * The model is asked for ONLY that fragment's replacement — never the whole
+ * document — and the server splices it in. `snippet` must still match the code
+ * at [start, end) or the request is rejected, so a stale selection can never
+ * clobber a different part of the document.
+ *
+ * Result is persisted as a normal user+assistant message pair (so history, the
+ * artifact panel and reloads all keep working) with `artifactEdit` metadata.
+ */
+router.post('/:id/artifact-edit', async (req, res, next) => {
+  try {
+    const { messageId, artifactIndex, start, end, snippet, instruction, targetLabel, modelId } =
+      req.body || {};
+
+    const text = typeof instruction === 'string' ? instruction.trim() : '';
+    if (!text) return res.status(400).json({ error: 'instruction is required' });
+    if (text.length > 2000) return res.status(400).json({ error: 'instruction is too long' });
+    if (typeof snippet !== 'string' || !snippet.length)
+      return res.status(400).json({ error: 'snippet is required' });
+    if (snippet.length > 120_000)
+      return res.status(400).json({ error: 'Selected element is too large to edit — pick a smaller part' });
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start)
+      return res.status(400).json({ error: 'Invalid selection range' });
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ error: 'Conversation not found' });
+    if (!mongoose.isValidObjectId(messageId))
+      return res.status(404).json({ error: 'Message not found in this conversation' });
+
+    const conversation = await Conversation.findById(req.params.id);
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+
+    const sourceMessage = await Message.findById(messageId);
+    if (!sourceMessage || String(sourceMessage.conversationId) !== String(conversation._id))
+      return res.status(404).json({ error: 'Message not found in this conversation' });
+
+    const artifacts = extractArtifacts(sourceMessage.content);
+    const index = Number.isInteger(artifactIndex) ? artifactIndex : 0;
+    const artifact = artifacts[index];
+    if (!artifact) return res.status(404).json({ error: 'Artifact not found on that message' });
+
+    // The selection must still describe the stored code exactly.
+    if (end > artifact.code.length || artifact.code.slice(start, end) !== snippet)
+      return res.status(409).json({
+        error: 'This artifact changed since you selected that element — reopen the preview and pick it again.',
+      });
+
+    const model = getModel(modelId || conversation.modelId);
+    if (!model) return res.status(400).json({ error: 'Unknown modelId' });
+
+    // The label is derived from the artifact's own tag/id/class, i.e. text a model
+    // wrote, and it gets interpolated into message content — so keep it to the
+    // shape it's meant to have (tag#id.class) rather than letting it smuggle
+    // markdown (a link, an image) into the assistant's own transcript.
+    const label = (typeof targetLabel === 'string' ? targetLabel : '')
+      .replace(/[^\w.#:-]/g, '')
+      .slice(0, 60);
+
+    let replacement;
+    let usage = null;
+    try {
+      if (model.company === 'demo') {
+        // Offline path: deterministic marker edit, no model involved.
+        const result = await demoEditFragment({ snippet, instruction: text });
+        replacement = result.content;
+      } else {
+        const result = await streamChat({
+          model,
+          messages: [
+            {
+              role: 'user',
+              content: buildEditPrompt({
+                code: artifact.code,
+                start,
+                end,
+                snippet,
+                instruction: text,
+                language: artifact.language,
+                targetLabel: label,
+              }),
+            },
+          ],
+          system: EDIT_SYSTEM_PROMPT,
+          onToken: () => {},
+        });
+        usage = result.usage || null;
+        replacement = cleanFragment(result.content, snippet);
+      }
+    } catch (err) {
+      return res.status(502).json({ error: err?.message || 'The edit failed' });
+    }
+
+    const newCode = artifact.code.slice(0, start) + replacement + artifact.code.slice(end);
+    const unchanged = replacement.trim() === snippet.trim();
+    const tagSwapped = rootTag(replacement) !== rootTag(snippet);
+
+    const meta = {
+      instruction: text,
+      target: label,
+      sourceMessageId: sourceMessage._id,
+    };
+    const userMessage = await Message.create({
+      conversationId: conversation._id,
+      role: 'user',
+      content: label ? `Edit \`${label}\`: ${text}` : `Edit selected element: ${text}`,
+      artifactEdit: meta,
+    });
+    const message = await Message.create({
+      conversationId: conversation._id,
+      role: 'assistant',
+      modelId: model.id,
+      content: [
+        `Updated \`${label || 'the selected element'}\`${unchanged ? ' — no change was needed' : ''}.`,
+        '',
+        artifactFence(artifact.language, newCode),
+      ].join('\n'),
+      ...(usage ? { usage } : {}),
+      artifactEdit: meta,
+    });
+
+    conversation.lastMessageAt = new Date();
+    await conversation.save();
+
+    res.json({
+      userMessage,
+      message,
+      conversation,
+      unchanged,
+      tagSwapped,
+      usage,
+    });
   } catch (err) {
     next(err);
   }
@@ -287,8 +435,16 @@ router.post('/:id/messages', async (req, res, next) => {
       const usable = history.filter(
         (m) => (m.content && m.content.trim()) || m.attachments?.length
       );
+      // Point-and-edit appends a full copy of the artifact per edit. Keep the two
+      // most recent turns verbatim and summarize older edit copies, so a long
+      // editing session doesn't push the same document at the model ten times.
+      const keepFullFrom = usable.length - 2;
       const providerMessages = usable.map((m, idx) => {
         const isLast = idx === usable.length - 1;
+        const baseContent =
+          m.artifactEdit?.instruction && idx < keepFullFrom
+            ? summarizeArtifactFences(m.content)
+            : m.content;
         const imageAtts = (m.attachments || []).filter((a) => a.kind !== 'pdf');
         const pdfText = pdfInjection(
           m.attachments,
@@ -300,8 +456,8 @@ router.post('/:id/messages', async (req, res, next) => {
         );
         const injectedText = [pdfText, docText].filter(Boolean).join('\n\n');
         const resolvedContent = injectedText
-          ? `${m.content}\n\n${injectedText}`.trim()
-          : m.content;
+          ? `${baseContent}\n\n${injectedText}`.trim()
+          : baseContent;
         return {
           role: m.role,
           content: resolvedContent,

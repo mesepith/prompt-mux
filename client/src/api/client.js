@@ -29,6 +29,14 @@ export const api = {
   updateConversation: (id, patch) =>
     request(`/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteConversation: (id) => request(`/conversations/${id}`, { method: 'DELETE' }),
+  // Point-and-edit: replace one element of an artifact in place. `start`/`end`
+  // are character offsets into the stored artifact code and `snippet` is what's
+  // currently there — the server refuses the edit if they no longer match.
+  editArtifact: (conversationId, body) =>
+    request(`/conversations/${conversationId}/artifact-edit`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 };
 
 /**

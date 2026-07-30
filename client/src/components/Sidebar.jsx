@@ -2,6 +2,7 @@ import { MessageSquare, Plus, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store/useStore.js';
 import { timeAgo } from '../lib/artifacts.js';
+import { conversationPath } from '../lib/router.js';
 
 export default function Sidebar() {
   const {
@@ -75,21 +76,30 @@ export default function Sidebar() {
               <div
                 key={c._id}
                 className={clsx(
-                  'group flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2.5 transition-colors',
+                  'group flex items-center gap-2 rounded-xl px-3 py-2.5 transition-colors',
                   c._id === currentId
                     ? 'bg-white/[0.08] text-zinc-100'
                     : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200'
                 )}
-                onClick={() => {
-                  selectConversation(c._id);
-                  if (window.innerWidth < 1024) toggleSidebar();
-                }}
               >
-                <MessageSquare size={14} className="shrink-0 text-zinc-600" />
-                <span className="min-w-0 flex-1 truncate text-sm">{c.title}</span>
-                <span className="shrink-0 text-[10px] text-zinc-600 group-hover:hidden">
-                  {timeAgo(c.lastMessageAt)}
-                </span>
+                {/* A real <a> so chats can be copied as links, middle-clicked or
+                    ⌘/ctrl-clicked into a new tab; plain clicks stay client-side. */}
+                <a
+                  href={conversationPath(c._id)}
+                  className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
+                  onClick={(e) => {
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+                    e.preventDefault();
+                    selectConversation(c._id);
+                    if (window.innerWidth < 1024) toggleSidebar();
+                  }}
+                >
+                  <MessageSquare size={14} className="shrink-0 text-zinc-600" />
+                  <span className="min-w-0 flex-1 truncate text-sm">{c.title}</span>
+                  <span className="shrink-0 text-[10px] text-zinc-600 group-hover:hidden">
+                    {timeAgo(c.lastMessageAt)}
+                  </span>
+                </a>
                 <button
                   type="button"
                   title="Delete chat"

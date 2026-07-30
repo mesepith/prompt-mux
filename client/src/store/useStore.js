@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, streamMessage } from '../api/client.js';
 import { extractArtifacts } from '../lib/artifacts.js';
+import { currentRouteId, navigateTo } from '../lib/router.js';
 
 export const useStore = create((set, get) => ({
   // registry
@@ -23,9 +24,14 @@ export const useStore = create((set, get) => ({
   // ui
   sidebarOpen: typeof window !== 'undefined' ? window.innerWidth >= 1024 : true,
   activeArtifact: null,
+  // point-and-edit (artifact panel)
+  artifactEditBusy: false,
+  artifactEditError: null,
+  artifactEditNote: null,
   activeAttachment: null, // { kind, dataUrl, name } — opens the lightbox viewer
   booted: false,
   bootError: null,
+  linkError: null, // a shared/bookmarked /c/<id> link that no longer resolves
 
   // ---------- helpers ----------
   modelById: (id) => get().models.find((m) => m.id === id),
@@ -52,10 +58,22 @@ export const useStore = create((set, get) => ({
         selectedModelId: firstAvailable?.id || 'demo-artist',
         booted: true,
       });
+      // Deep link: /c/<id> opens that chat straight away (bookmark / shared link).
+      const routeId = currentRouteId();
+      if (routeId) await get().selectConversation(routeId, { updateUrl: false });
     } catch (err) {
       set({ bootError: err.message, booted: true });
     }
   },
+
+  // Back/forward buttons: mirror whatever the URL now says.
+  handleRouteChange: (id) => {
+    if (id === get().currentId) return;
+    if (id) get().selectConversation(id, { updateUrl: false });
+    else get().newChat({ updateUrl: false });
+  },
+
+  dismissLinkError: () => set({ linkError: null }),
 
   // ---------- attachments (composer + drop zone) ----------
   addAttachments: (files) => {
@@ -110,26 +128,56 @@ export const useStore = create((set, get) => ({
   clearAttachments: () => set({ attachments: [], attachError: null }),
 
   // ---------- conversations ----------
-  selectConversation: async (id) => {
+  // `updateUrl: false` when the URL is already the source of truth (deep link,
+  // back/forward) — otherwise every selection pushes /c/<id> onto the history.
+  selectConversation: async (id, { updateUrl = true } = {}) => {
     if (get().streaming) get().stopStreaming();
-    set({ currentId: id, activeArtifact: null, messages: [], attachments: [], attachError: null });
+    if (updateUrl) navigateTo(id);
+    set({
+      currentId: id,
+      activeArtifact: null,
+      messages: [],
+      attachments: [],
+      attachError: null,
+      linkError: null,
+    });
     try {
       const convo = await api.getConversation(id);
       // Guard against a fast second click.
       if (get().currentId !== id) return;
-      set({ messages: convo.messages, selectedModelId: convo.modelId });
+      const { messages, ...meta } = convo;
+      set((s) => ({
+        messages,
+        selectedModelId: convo.modelId,
+        // A link opened in another tab/window may point at a chat this list
+        // hasn't seen yet — fold it in so the sidebar and title bar match.
+        conversations: s.conversations.some((c) => c._id === id)
+          ? s.conversations
+          : [meta, ...s.conversations],
+      }));
     } catch (err) {
-      set({ bootError: err.message });
+      if (get().currentId !== id) return;
+      set({ currentId: null, messages: [], linkError: `Can't open that chat link — ${err.message}` });
+      navigateTo(null, { replace: true });
     }
   },
 
-  newChat: () => {
+  newChat: ({ updateUrl = true } = {}) => {
     if (get().streaming) get().stopStreaming();
-    set({ currentId: null, messages: [], activeArtifact: null, attachments: [], attachError: null });
+    if (updateUrl) navigateTo(null);
+    set({
+      currentId: null,
+      messages: [],
+      activeArtifact: null,
+      attachments: [],
+      attachError: null,
+      linkError: null,
+    });
   },
 
   deleteConversation: async (id) => {
     await api.deleteConversation(id);
+    if (get().currentId === id) navigateTo(null, { replace: true });
     set((s) => ({
       conversations: s.conversations.filter((c) => c._id !== id),
       ...(s.currentId === id ? { currentId: null, messages: [], activeArtifact: null } : {}),
@@ -182,6 +230,9 @@ export const useStore = create((set, get) => ({
       );
       currentId = convo._id;
       set((s) => ({ currentId, conversations: [convo, ...s.conversations], messages: [] }));
+      // The chat now has a permanent link — swap `/` for it (replace, not push,
+      // so Back leaves the app instead of returning to an empty new chat).
+      navigateTo(currentId, { replace: true });
     }
 
     const tempUser = {
@@ -203,7 +254,7 @@ export const useStore = create((set, get) => ({
     }));
 
     const finish = (message) => {
-      const artifacts = extractArtifacts(message?.content || '');
+      const artifacts = extractArtifacts(message?.content || '', message?._id);
       set((s) => ({
         messages: [...s.messages, message],
         streaming: false,
@@ -268,8 +319,83 @@ export const useStore = create((set, get) => ({
   },
 
   // ---------- artifacts / ui ----------
-  openArtifact: (artifact) => set({ activeArtifact: artifact }),
-  closeArtifact: () => set({ activeArtifact: null }),
+  openArtifact: (artifact) =>
+    set({ activeArtifact: artifact, artifactEditError: null, artifactEditNote: null }),
+  closeArtifact: () => set({ activeArtifact: null, artifactEditError: null, artifactEditNote: null }),
+
+  /**
+   * Point-and-edit: rewrite ONE element of the open artifact. `start`/`end` are
+   * offsets into `activeArtifact.code` (from lib/htmlNodes.js) and `snippet` is
+   * the current text there; the server re-checks both before touching anything.
+   * The edit lands as a normal message pair, so it survives reload and shows up
+   * in the transcript. Returns { ok, error }.
+   */
+  editArtifactElement: async ({ start, end, snippet, instruction, targetLabel }) => {
+    const { activeArtifact, currentId, selectedModelId } = get();
+    if (!activeArtifact?.messageId || !currentId) {
+      const error = 'This artifact was not saved yet — send a message first.';
+      set({ artifactEditError: error });
+      return { ok: false, error };
+    }
+    // A model edit takes seconds; the user can switch chats meanwhile. Remember
+    // what this request was for so its result can't land in another transcript.
+    const requestConvoId = currentId;
+    const requestMessageId = activeArtifact.messageId;
+    set({ artifactEditBusy: true, artifactEditError: null, artifactEditNote: null });
+    try {
+      const res = await api.editArtifact(requestConvoId, {
+        messageId: requestMessageId,
+        artifactIndex: activeArtifact.index ?? 0,
+        start,
+        end,
+        snippet,
+        instruction,
+        targetLabel,
+        modelId: selectedModelId,
+      });
+      if (get().currentId !== requestConvoId) {
+        // Saved server-side; it'll be there when the user comes back to that chat.
+        set({ artifactEditBusy: false });
+        return { ok: false, error: 'You switched chats — the edit was saved in the original chat.' };
+      }
+      const artifacts = extractArtifacts(res.message.content, res.message._id);
+      const stillSameArtifact = get().activeArtifact?.messageId === requestMessageId;
+      const note = !artifacts.length
+        ? null
+        : res.unchanged
+          ? 'The model returned the element unchanged — try a more specific instruction.'
+          : res.tagSwapped
+            ? 'Applied — note that the element type changed.'
+            : null;
+      set((s) => ({
+        messages: [...s.messages, res.userMessage, res.message],
+        conversations: s.conversations
+          .map((c) => (c._id === requestConvoId ? res.conversation : c))
+          .sort((a, b) => new Date(b.lastMessageAt) - new Date(a.lastMessageAt)),
+        // Only re-point the panel if it's still showing the artifact we edited.
+        ...(artifacts.length && stillSameArtifact ? { activeArtifact: artifacts[0] } : {}),
+        artifactEditBusy: false,
+        artifactEditNote: note,
+        // An edit that shrinks the artifact below the preview threshold can't be
+        // shown — say so instead of leaving the panel silently one version behind.
+        ...(artifacts.length
+          ? {}
+          : {
+              artifactEditError:
+                'The edit was saved but left too little markup to preview — the panel still shows the previous version.',
+            }),
+      }));
+      return { ok: artifacts.length > 0, unchanged: res.unchanged };
+    } catch (err) {
+      if (get().currentId !== requestConvoId) {
+        set({ artifactEditBusy: false });
+        return { ok: false, error: err.message };
+      }
+      set({ artifactEditBusy: false, artifactEditError: err.message });
+      return { ok: false, error: err.message };
+    }
+  },
+  clearArtifactEditFeedback: () => set({ artifactEditError: null, artifactEditNote: null }),
   openAttachment: (att) => set({ activeAttachment: att }),
   closeAttachment: () => set({ activeAttachment: null }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),

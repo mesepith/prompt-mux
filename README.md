@@ -16,6 +16,14 @@ live previews.
 - **Live artifacts** — ask for a website, game, dashboard or component and the model's
   self-contained HTML/SVG output renders instantly in a sandboxed side panel
   (Preview / Code tabs, copy, open-in-new-tab).
+- **Point & edit** — no more "please change the button" and getting a whole new page back.
+  Hit the crosshair button in the artifact panel, click the heading/button/section you
+  want, and a little box opens next to it: say what to change and **only that element's
+  markup is rewritten**. The rest of the document is spliced back byte-for-byte, so the
+  model can't quietly redesign the parts you liked (and the request stays small and cheap
+  — a one-line edit on a 3 KB page costs ~1k tokens). `↑` widens the selection to the
+  parent element; every edit is saved as a "Targeted edit" turn in the chat, so it
+  survives reload and older versions stay in the transcript.
 - **Image upload + two-model vision routing** — attach images to any message. Models
   marked `vision` in the registry handle them natively; if your chat model can't see
   images (e.g. DeepSeek), a separate **image model** of your choice describes them and
@@ -33,6 +41,10 @@ live previews.
   estimated cost in USD. Prices live in the model registry.
 - **Persistent history** — conversations and messages stored in MongoDB, auto-titled,
   renameable, deletable.
+- **A link per chat** — every chat gets its own URL (`/c/<id>`) the moment it starts, so
+  you can bookmark it or send it to someone. **Share link** in the header copies it,
+  sidebar chats are real links (⌘/ctrl-click for a new tab), and Back/Forward move
+  between chats. Opening a deleted link drops you on a new chat with a notice.
 - **Professional dark UI** — React 19 + Tailwind, markdown rendering with syntax
   highlighting, responsive down to mobile.
 - **Offline demo provider** — try the whole experience (streaming + artifacts) with
@@ -143,8 +155,13 @@ Providers without keys simply show as locked in the model picker.
 
 - Artifact previews run in a sandboxed iframe (`sandbox="allow-scripts"`): the
   model's JS can run but cannot touch your app's origin/storage.
+- Point & edit replaces one element at a time, so it's the wrong tool for "restructure the
+  whole page" — for that, just ask in the chat as usual. There's no undo button yet;
+  every version stays in the transcript, so click an older artifact card to get it back.
 - No user accounts yet — it's a single-user workspace; the data layer is ready for
-  an auth layer if you add one later.
+  an auth layer if you add one later. That also means a `/c/<id>` link is only as
+  private as the deployment: anyone who can reach the app can open a chat link (and
+  the sidebar). Put it behind auth/VPN before sharing links outside your circle.
 - Moonshot's China endpoint: set `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1`.
 - Z.ai's China endpoint: set `ZAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4`.
 - DeepSeek V4 runs in "thinking mode" by default on their side — reasoning tokens are

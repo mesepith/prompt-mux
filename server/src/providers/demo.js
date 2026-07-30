@@ -116,3 +116,51 @@ export async function streamChat({ apiModel, messages = [], signal, onToken }) {
     usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens },
   };
 }
+
+/**
+ * Offline stand-in for a point-and-edit request. There is no model behind the
+ * demo provider, so instead of inventing markup it makes a deterministic,
+ * clearly-labelled change to the selected fragment: a dashed violet outline
+ * plus the instruction recorded on the element. That's enough to exercise the
+ * whole select → edit → splice → re-render path with no API keys.
+ */
+export async function editFragment({ snippet, instruction }) {
+  await sleep(250);
+  const openEnd = openTagEnd(snippet);
+  if (openEnd === -1) return { content: snippet, usage: null };
+
+  const openTag = snippet.slice(0, openEnd);
+  const note = String(instruction || '')
+    .slice(0, 120)
+    .replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const demoStyle = 'outline:3px dashed #8b5cf6;outline-offset:3px';
+
+  // Merge into an existing style attribute — a duplicate one would be ignored.
+  const styleMatch = openTag.match(/(\sstyle\s*=\s*)(["'])([\s\S]*?)\2/i);
+  let patched;
+  if (styleMatch) {
+    const merged = `${styleMatch[1]}${styleMatch[2]}${styleMatch[3].replace(/;?\s*$/, '')};${demoStyle}${styleMatch[2]}`;
+    patched = openTag.replace(styleMatch[0], merged);
+  } else {
+    const selfClosing = /\/>$/.test(openTag);
+    patched = `${openTag.slice(0, selfClosing ? -2 : -1)} style="${demoStyle}"${selfClosing ? '/>' : '>'}`;
+  }
+  patched = patched.replace(/(\s*\/?>)$/, ` data-demo-edit="${note}"$1`);
+  return { content: patched + snippet.slice(openEnd), usage: null };
+}
+
+/** Index just past the fragment's first ">" , skipping quoted attributes. */
+function openTagEnd(fragment) {
+  if (!fragment.startsWith('<')) return -1;
+  for (let i = 1; i < fragment.length; i++) {
+    const ch = fragment[i];
+    if (ch === '"' || ch === "'") {
+      const q = fragment.indexOf(ch, i + 1);
+      if (q === -1) return -1;
+      i = q;
+      continue;
+    }
+    if (ch === '>') return i + 1;
+  }
+  return -1;
+}
