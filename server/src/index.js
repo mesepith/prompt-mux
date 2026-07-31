@@ -93,8 +93,11 @@ connectDB()
       if (AUTH_PASSWORD) console.log(`[auth] password required (user "${AUTH_USER}")`);
       else
         console.warn(
-          '[auth] APP_PASSWORD is not set — anyone who can reach this port can read every chat, ' +
-            'including text from uploaded PDFs. Set APP_PASSWORD in server/.env before exposing it.'
+          `[auth] APP_PASSWORD is not set — anything that can reach port ${PORT} can read every ` +
+            'chat, including text from uploaded PDFs. Fine if a proxy in front already requires ' +
+            'credentials (nginx auth_basic / .htaccess, a VPN) AND this port is not reachable ' +
+            'directly — note that also means other processes on the same host. Otherwise set ' +
+            'APP_PASSWORD in server/.env.'
         );
     });
   })

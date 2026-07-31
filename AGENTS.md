@@ -78,7 +78,10 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   visits read every conversation, since the API has no per-request identity. Auth is
   optional HTTP Basic gated on `APP_PASSWORD`, applied as the first middleware so it
   covers the API, the SPA and static files (`/api/health` stays open for monitoring).
-  Keep the startup warning when it's unset.
+  Keep the startup warning when it's unset — a deployment may legitimately rely on proxy
+  auth instead (the live box uses nginx `auth_basic`), but then `APP_PASSWORD` must be
+  either empty or the *same* credentials, because nginx forwards `Authorization` upstream
+  and a mismatch 401s everything.
 - **Point & edit** (surgical artifact editing) — the one invariant: *the model rewrites a
   fragment, the server splices it; nobody regenerates the document*.
   - `client/src/lib/htmlNodes.js` scans artifact source into elements with exact

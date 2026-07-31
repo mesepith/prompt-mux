@@ -124,10 +124,13 @@ pm2 start deploy/ecosystem.config.cjs # run under PM2
 pm2 save && pm2 startup               # survive reboots
 ```
 
-> **Set `APP_PASSWORD` before the port is reachable.** There are no user accounts, so
-> without it the API serves every conversation — including text extracted from your
-> uploaded PDFs — to anyone who can reach the host. After editing `.env`, restart with
-> `pm2 restart prompt-mux --update-env` (a plain restart may not pick up new env vars).
+> **Make sure a password covers the app before the port is reachable** — either nginx
+> `auth_basic`/`.htaccess` in front (covering `/api/` as well as `/`), or `APP_PASSWORD`
+> in `server/.env`. Without one, the API serves every conversation — including text
+> extracted from your uploaded PDFs — to anyone who can reach the host. If you use both,
+> they must be the same credentials (see "Notes & limitations"). After editing `.env`,
+> restart with `pm2 restart prompt-mux --update-env` (a plain restart may not pick up new
+> env vars).
 
 Put nginx in front (config in `deploy/nginx.conf`) for TLS and port 80/443.
 The nginx config already disables response buffering on `/api/` so SSE streaming works.
@@ -146,7 +149,7 @@ NODE_ENV=production node server/src/index.js   # serves app + API on :5050
 | -------- | ------- |
 | `PORT` | API/app port (default `5050`) |
 | `MONGODB_URI` | Mongo connection string (default `mongodb://127.0.0.1:27017/promptmux`) |
-| `APP_PASSWORD` | **Set this before exposing the app.** Password for the whole app (HTTP Basic). Empty = no auth. |
+| `APP_PASSWORD` | App-level password (HTTP Basic). Empty = no auth — only safe if a proxy in front already requires one (see below). |
 | `APP_USER` | Username to go with it (default `promptmux`) |
 | `OPENAI_API_KEY` | OpenAI models |
 | `ANTHROPIC_API_KEY` | Claude models |
@@ -176,10 +179,20 @@ Providers without keys simply show as locked in the model picker.
 - Point & edit replaces one element at a time, so it's the wrong tool for "restructure the
   whole page" — for that, just ask in the chat as usual. There's no undo button yet;
   every version stays in the transcript, so click an older artifact card to get it back.
-- No user accounts — it's a single-user workspace, gated by one shared password
-  (`APP_PASSWORD`). With it unset the server is wide open: fine on a laptop, never on a
-  reachable host, since the API hands over every chat plus the text extracted from every
-  PDF you uploaded. The server prints a warning at startup when it's unset.
+- No user accounts — it's a single-user workspace behind one password. That password can
+  live in **either** place, and one is enough:
+  - **In front of the app** — nginx `auth_basic` / `.htaccess`, or a VPN. Make sure it
+    covers `/api/` too: with a separate `location /api/ { ... }` block, nginx does *not*
+    inherit `auth_basic` from `location /`, so put it in both (or at `server` level), and
+    keep the app port unreachable from outside.
+  - **In the app** — `APP_PASSWORD` in `server/.env`.
+
+  Both is fine too, but then they must be the **same** user and password: nginx forwards
+  the `Authorization` header upstream, so mismatched credentials mean the app 401s every
+  request and the browser prompts forever. Neither means the API hands over every chat —
+  plus the text extracted from every PDF — to anyone who can reach it; the server warns
+  about that at startup.
+
   A `/c/<id>` link is exactly as private as that password, so anyone you share a link
   with needs it — and gets your whole sidebar too.
 - Terminate TLS in front of the app (see `deploy/nginx.conf` + certbot) — HTTP Basic
