@@ -23,8 +23,9 @@ async function request(path, options = {}) {
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     let code = null;
+    let body = null;
     try {
-      const body = await res.json();
+      body = await res.json();
       if (body?.error) message = body.error;
       if (body?.code) code = body.code;
     } catch {
@@ -33,6 +34,7 @@ async function request(path, options = {}) {
     const err = new Error(message);
     err.status = res.status;
     err.code = code;
+    err.body = body; // callers can act on flags like { noAccount: true }
     throw err;
   }
   return res.json();

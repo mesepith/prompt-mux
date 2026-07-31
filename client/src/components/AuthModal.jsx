@@ -304,7 +304,27 @@ export default function AuthModal() {
               >
                 Back to log in
               </button>
-            ) : null}
+            ) : (
+              // VERIFY / RESET: the code screens had no navigation at all, so a
+              // user waiting for a code that never arrives had nowhere to go.
+              <>
+                <button
+                  type="button"
+                  onClick={() => openAuthModal(MODES.LOGIN)}
+                  className="text-indigo-400 hover:text-indigo-300"
+                >
+                  Back to log in
+                </button>
+                <span>·</span>
+                <button
+                  type="button"
+                  onClick={() => openAuthModal(isReset ? MODES.SIGNUP : MODES.FORGOT)}
+                  className="text-indigo-400 hover:text-indigo-300"
+                >
+                  {isReset ? 'Sign up instead' : 'Use a different email'}
+                </button>
+              </>
+            )}
           </div>
         </form>
       </div>

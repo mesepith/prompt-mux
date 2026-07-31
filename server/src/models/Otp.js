@@ -16,6 +16,9 @@ const otpSchema = new mongoose.Schema(
       required: true,
     },
     expiresAt: { type: Date, required: true },
+    // Wrong guesses against this code. Capped in lib/otp.js — a 6-digit code with
+    // unlimited attempts is a brute-forceable account takeover.
+    attempts: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

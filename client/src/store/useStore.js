@@ -229,6 +229,18 @@ export const useStore = create((set, get) => ({
       });
       return { ok: true };
     } catch (err) {
+      // No account for that address: send them to sign-up with the email kept,
+      // instead of leaving them on a screen waiting for a code that never comes.
+      if (err.body?.noAccount) {
+        set({
+          authLoading: false,
+          authMode: 'signup',
+          pendingOtpEmail: null,
+          authInfo: null,
+          authError: 'No account uses that email — create one below.',
+        });
+        return { ok: false, error: err.message };
+      }
       set({ authLoading: false, authError: err.message });
       return { ok: false, error: err.message };
     }
@@ -272,7 +284,9 @@ export const useStore = create((set, get) => ({
       set({ authLoading: false, authInfo: 'A new code has been sent.' });
       return { ok: true };
     } catch (err) {
-      set({ authLoading: false, authError: err.message });
+      // Clear authInfo too, or the green "enter the code" banner keeps sitting
+      // above the red failure and the screen contradicts itself.
+      set({ authLoading: false, authInfo: null, authError: err.message });
       return { ok: false, error: err.message };
     }
   },

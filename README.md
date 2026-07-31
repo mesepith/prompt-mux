@@ -124,6 +124,9 @@ pm2 start deploy/ecosystem.config.cjs # run under PM2
 pm2 save && pm2 startup               # survive reboots
 ```
 
+> **Set `ALLOWED_EMAILS` to your own address before going live**, unless you really want a
+> public sign-up form spending your API credits.
+>
 > **Set `JWT_SECRET` (≥16 chars) and working SMTP settings before going live** — accounts
 > and the sign-up OTP email depend on them, and without a login nobody (including you) can
 > see any conversation. Registration is open to anyone who can reach the app, and API costs
@@ -149,6 +152,7 @@ NODE_ENV=production node server/src/index.js   # serves app + API on :5050
 | `PORT` | API/app port (default `5050`) |
 | `MONGODB_URI` | Mongo connection string (default `mongodb://127.0.0.1:27017/promptmux`) |
 | `JWT_SECRET` | **Required** for accounts — signs the login cookie (≥16 chars; the server throws without it) |
+| `ALLOWED_EMAILS` | Who may register: exact addresses and/or `@domain` entries, comma-separated. Empty = open sign-up |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` / `SMTP_SECURE` | Sends the sign-up / password-reset OTP emails |
 | `ANONYMOUS_MESSAGE_LIMIT` | Messages a not-logged-in visitor may send (default `3`) |
 | `OTP_EXPIRY_MINUTES` | OTP lifetime (default `10`) |
@@ -185,15 +189,24 @@ Providers without keys simply show as locked in the model picker.
   (`server/src/middleware/auth.js`). Conversations belong to a `userId`, or to a
   `sessionId` for visitors who haven't signed up. Every conversation route filters by
   owner, so an unauthenticated `GET /api/conversations` returns `[]`.
-  Two consequences worth knowing if you host it publicly:
-  - **Registration is open to anyone**, and a registered user has no message cap — every
-    reply is billed to *your* provider keys. Gate it if the app is reachable: allowlist
-    your own email in `routes/auth.js`, keep nginx `auth_basic` on `/api/auth/register`,
-    or add a per-user cap.
-  - `ANONYMOUS_MESSAGE_LIMIT` (default 3) is counted per `sessionId`, and that id comes
-    from the browser — clearing site data yields a fresh allowance. Treat it as a nudge,
-    not a spending limit.
+  Abuse limits, all of them friction rather than guarantees:
+  - **Sign-up** is closed to everyone outside `ALLOWED_EMAILS` when that's set, and open
+    when it isn't. Leaving it open on a reachable host means strangers chatting on your
+    provider keys, and your SMTP mailing codes to any address they type.
+  - **Wrong OTP codes** are capped at 5 per code (`lib/otp.js`), after which the code is
+    destroyed and a new one must be requested — at most one per minute per address. That's
+    what stops a 6-digit code (900,000 possibilities) from being guessed.
+  - **Logins** are capped at 8 per account and 40 per IP per 15 minutes; failures are
+    recorded as `login_failed` in the audit log, rate-limit hits as `rate_limited`, and bad
+    codes as `otp_failed`, so guessing leaves a trail. A successful login or password reset
+    clears the account's counter.
+  - `ANONYMOUS_MESSAGE_LIMIT` (default 3) covers both chat messages and artifact edits, but
+    it's counted per `sessionId` and that id comes from the browser — clearing site data
+    yields a fresh allowance. Treat it as a nudge, not a spending limit; `ALLOWED_EMAILS`
+    plus turning anonymous use off is the real control.
   - A `/c/<id>` link only opens for the account (or session) that owns that chat.
+  - Express runs with `trust proxy: 'loopback'` so `req.ip` and the audit log show the real
+    client address behind nginx instead of `127.0.0.1`.
 - Terminate TLS in front of the app (see `deploy/nginx.conf` + certbot) — the login cookie
   is only marked `Secure` when `NODE_ENV=production`, and passwords are posted on login.
 - Moonshot's China endpoint: set `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1`.

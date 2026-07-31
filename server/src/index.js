@@ -17,6 +17,12 @@ import conversationsRouter from './routes/conversations.js';
 const app = express();
 const PORT = process.env.PORT || 5050;
 
+// nginx sits in front and forwards X-Forwarded-For. Without this, req.ip is always
+// 127.0.0.1, which makes per-IP rate limits global and every audit entry useless
+// for tracing abuse. 'loopback' trusts only the local proxy, not arbitrary callers
+// claiming a forwarded IP.
+app.set('trust proxy', 'loopback');
+
 // NO CORS by design. The client is always same-origin — Express serves the built
 // app in production, and Vite proxies /api in dev — so an Access-Control-Allow-Origin
 // header would only ever help someone else's page read this user's chats.

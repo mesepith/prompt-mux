@@ -10,9 +10,15 @@ const auditLogSchema = new mongoose.Schema(
         'user_registered',
         'email_verified',
         'user_login',
+        'login_failed',
         'password_reset',
         'logout',
         'anonymous_limit_reached',
+        // Abuse signals: without these, password guessing and code guessing on a
+        // publicly reachable instance leave no trace at all.
+        'otp_failed',
+        'rate_limited',
+        'registration_blocked',
       ],
       required: true,
       index: true,

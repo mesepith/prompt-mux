@@ -238,6 +238,25 @@ router.post('/:id/artifact-edit', async (req, res, next) => {
     if (!conversation || !ownsConversation(req, conversation))
       return res.status(404).json({ error: 'Conversation not found' });
 
+    // A point-edit is a paid model call like any other, so it counts against the
+    // anonymous allowance too — otherwise this endpoint is an unmetered way for a
+    // stranger to spend the owner's API credits.
+    if (!req.userId && req.sessionId) {
+      const sent = await Message.countDocuments({ sessionId: req.sessionId, role: 'user' });
+      if (sent >= ANONYMOUS_MESSAGE_LIMIT) {
+        audit({
+          event: 'anonymous_limit_reached',
+          sessionId: req.sessionId,
+          req,
+          metadata: { messageCount: sent, limit: ANONYMOUS_MESSAGE_LIMIT, route: 'artifact-edit' },
+        });
+        return res.status(403).json({
+          error: 'Anonymous message limit reached. Please sign up or log in to continue.',
+          code: 'ANONYMOUS_LIMIT_REACHED',
+        });
+      }
+    }
+
     const sourceMessage = await Message.findById(messageId);
     if (!sourceMessage || String(sourceMessage.conversationId) !== String(conversation._id))
       return res.status(404).json({ error: 'Message not found in this conversation' });

@@ -80,6 +80,27 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   also chat anonymously up to `ANONYMOUS_MESSAGE_LIMIT` total messages per browser session
   (`pm_session_id` in localStorage); after the limit, the UI prompts for login and the
   server merges their anonymous chats into the new account.
+- **Auth abuse limits — keep these when touching `routes/auth.js`.** They exist because the
+  app is internet-reachable and runs on the owner's paid keys:
+  - Every OTP check goes through `lib/otp.js#consumeOtp`, never a bare
+    `Otp.findOne({ code })`. It `$inc`s attempts atomically (so parallel guesses can't all
+    read 0) and destroys the code after `MAX_OTP_ATTEMPTS`. A 6-digit code is 900,000
+    possibilities — unlimited guesses on `/reset-password` was full account takeover.
+  - Issue a new code only after `clearOtps()`, so codes can't stack up (one per minute
+    against a 10-minute expiry meant ~10 live codes, i.e. 10× easier to guess), and delete
+    the code if the email fails to send — never leave a code the user never received.
+  - `/register` must NOT modify an existing unverified account's password: it's
+    unauthenticated, so that let anyone pre-set the password of a pending signup.
+  - Login goes through `hitLimit` per account and per IP, and every failure is audited
+    (`login_failed`, `otp_failed`, `rate_limited`, `registration_blocked` — add new event
+    names to the `AuditLog` enum or the write is silently rejected).
+  - Sign-up is gated by `config/access.js#isRegistrationAllowed` (`ALLOWED_EMAILS`).
+  - `app.set('trust proxy', 'loopback')` in `index.js` is what makes `req.ip` real behind
+    nginx; without it every per-IP limit is global and every audit row says `127.0.0.1`.
+  - Unknown-email answers are deliberately consistent across `/forgot-password`, `/resend`
+    and `/reset-password` (404 + `noAccount: true`). Don't "fix" one of them back to a fake
+    200: `/register` already reveals existence via 409, and the fake success is what sent
+    users to a code screen for an email that was never sent.
 - **Shared chats.** Conversations are private by default. The owner can toggle
   `shared: true` (`PATCH /api/conversations/:id`). When shared, `GET /api/conversations/:id`
   is readable by anyone, but all writes (messages, rename, delete, artifact-edit) remain
