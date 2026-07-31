@@ -119,18 +119,17 @@ The Express server serves the built React app itself — one process, one port.
 ```bash
 # on the server (or use the automated script)
 sudo bash deploy/ubuntu-setup.sh      # installs Node 22, MongoDB 8, PM2, builds the app
-nano server/.env                      # add real API keys AND set APP_PASSWORD
+nano server/.env                      # add real API keys, JWT_SECRET and SMTP settings
 pm2 start deploy/ecosystem.config.cjs # run under PM2
 pm2 save && pm2 startup               # survive reboots
 ```
 
-> **Make sure a password covers the app before the port is reachable** — either nginx
-> `auth_basic`/`.htaccess` in front (covering `/api/` as well as `/`), or `APP_PASSWORD`
-> in `server/.env`. Without one, the API serves every conversation — including text
-> extracted from your uploaded PDFs — to anyone who can reach the host. If you use both,
-> they must be the same credentials (see "Notes & limitations"). After editing `.env`,
-> restart with `pm2 restart prompt-mux --update-env` (a plain restart may not pick up new
-> env vars).
+> **Set `JWT_SECRET` (≥16 chars) and working SMTP settings before going live** — accounts
+> and the sign-up OTP email depend on them, and without a login nobody (including you) can
+> see any conversation. Registration is open to anyone who can reach the app, and API costs
+> land on *your* provider keys, so gate it if the app is public (see "Notes & limitations").
+> After editing `.env`, restart with `pm2 restart prompt-mux --update-env` (a plain restart
+> may not pick up new env vars).
 
 Put nginx in front (config in `deploy/nginx.conf`) for TLS and port 80/443.
 The nginx config already disables response buffering on `/api/` so SSE streaming works.
@@ -149,8 +148,11 @@ NODE_ENV=production node server/src/index.js   # serves app + API on :5050
 | -------- | ------- |
 | `PORT` | API/app port (default `5050`) |
 | `MONGODB_URI` | Mongo connection string (default `mongodb://127.0.0.1:27017/promptmux`) |
-| `APP_PASSWORD` | App-level password (HTTP Basic). Empty = no auth — only safe if a proxy in front already requires one (see below). |
-| `APP_USER` | Username to go with it (default `promptmux`) |
+| `JWT_SECRET` | **Required** for accounts — signs the login cookie (≥16 chars; the server throws without it) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` / `SMTP_SECURE` | Sends the sign-up / password-reset OTP emails |
+| `ANONYMOUS_MESSAGE_LIMIT` | Messages a not-logged-in visitor may send (default `3`) |
+| `OTP_EXPIRY_MINUTES` | OTP lifetime (default `10`) |
+| `BCRYPT_ROUNDS` | Password hashing cost |
 | `OPENAI_API_KEY` | OpenAI models |
 | `ANTHROPIC_API_KEY` | Claude models |
 | `GOOGLE_API_KEY` | Gemini models |
@@ -179,24 +181,21 @@ Providers without keys simply show as locked in the model picker.
 - Point & edit replaces one element at a time, so it's the wrong tool for "restructure the
   whole page" — for that, just ask in the chat as usual. There's no undo button yet;
   every version stays in the transcript, so click an older artifact card to get it back.
-- No user accounts — it's a single-user workspace behind one password. That password can
-  live in **either** place, and one is enough:
-  - **In front of the app** — nginx `auth_basic` / `.htaccess`, or a VPN. Make sure it
-    covers `/api/` too: with a separate `location /api/ { ... }` block, nginx does *not*
-    inherit `auth_basic` from `location /`, so put it in both (or at `server` level), and
-    keep the app port unreachable from outside.
-  - **In the app** — `APP_PASSWORD` in `server/.env`.
-
-  Both is fine too, but then they must be the **same** user and password: nginx forwards
-  the `Authorization` header upstream, so mismatched credentials mean the app 401s every
-  request and the browser prompts forever. Neither means the API hands over every chat —
-  plus the text extracted from every PDF — to anyone who can reach it; the server warns
-  about that at startup.
-
-  A `/c/<id>` link is exactly as private as that password, so anyone you share a link
-  with needs it — and gets your whole sidebar too.
-- Terminate TLS in front of the app (see `deploy/nginx.conf` + certbot) — HTTP Basic
-  sends the password on every request, so over plain HTTP it's readable on the wire.
+- **Accounts**: email + password with an OTP verification email, JWT in an httpOnly cookie
+  (`server/src/middleware/auth.js`). Conversations belong to a `userId`, or to a
+  `sessionId` for visitors who haven't signed up. Every conversation route filters by
+  owner, so an unauthenticated `GET /api/conversations` returns `[]`.
+  Two consequences worth knowing if you host it publicly:
+  - **Registration is open to anyone**, and a registered user has no message cap — every
+    reply is billed to *your* provider keys. Gate it if the app is reachable: allowlist
+    your own email in `routes/auth.js`, keep nginx `auth_basic` on `/api/auth/register`,
+    or add a per-user cap.
+  - `ANONYMOUS_MESSAGE_LIMIT` (default 3) is counted per `sessionId`, and that id comes
+    from the browser — clearing site data yields a fresh allowance. Treat it as a nudge,
+    not a spending limit.
+  - A `/c/<id>` link only opens for the account (or session) that owns that chat.
+- Terminate TLS in front of the app (see `deploy/nginx.conf` + certbot) — the login cookie
+  is only marked `Secure` when `NODE_ENV=production`, and passwords are posted on login.
 - Moonshot's China endpoint: set `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1`.
 - Z.ai's China endpoint: set `ZAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4`.
 - DeepSeek V4 runs in "thinking mode" by default on their side — reasoning tokens are
