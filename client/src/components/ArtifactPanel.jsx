@@ -77,6 +77,7 @@ function sanitizeSelection(node, nodes) {
 export default function ArtifactPanel() {
   const activeArtifact = useStore((s) => s.activeArtifact);
   const messages = useStore((s) => s.messages);
+  const currentConversationIsOwner = useStore((s) => s.currentConversationIsOwner);
   const closeArtifact = useStore((s) => s.closeArtifact);
   const editArtifactElement = useStore((s) => s.editArtifactElement);
   const clearArtifactEditFeedback = useStore((s) => s.clearArtifactEditFeedback);
@@ -288,11 +289,13 @@ export default function ArtifactPanel() {
         <button
           type="button"
           title={
-            savedArtifact
-              ? 'Point & edit — click a part of the preview and describe the change'
-              : 'Point & edit becomes available once the reply is saved'
+            !currentConversationIsOwner
+              ? 'Only the chat owner can edit artifacts'
+              : savedArtifact
+                ? 'Point & edit — click a part of the preview and describe the change'
+                : 'Point & edit becomes available once the reply is saved'
           }
-          disabled={!savedArtifact}
+          disabled={!savedArtifact || !currentConversationIsOwner}
           onClick={() => {
             setTab('preview');
             setPicking((v) => !v);

@@ -75,17 +75,30 @@ router.post('/', async (req, res, next) => {
 
 // GET /api/conversations/:id — conversation with full message history.
 // Shared/bookmarked links can be stale or mistyped, so a bad id is a 404, not a 500.
+// A shared conversation is readable by anyone, but only the owner can modify it.
 router.get('/:id', async (req, res, next) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id))
       return res.status(404).json({ error: 'Conversation not found' });
     const conversation = await Conversation.findById(req.params.id).lean();
-    if (!conversation || !ownsConversation(req, conversation))
+    const isOwner = conversation ? ownsConversation(req, conversation) : false;
+    if (!conversation || (!isOwner && !conversation.shared))
       return res.status(404).json({ error: 'Conversation not found' });
     const messages = await Message.find({ conversationId: conversation._id })
       .sort({ createdAt: 1 })
       .lean();
-    res.json({ ...conversation, messages });
+    // Don't expose the original owner's id to public viewers.
+    const safeConversation = isOwner
+      ? conversation
+      : { ...conversation, userId: undefined, sessionId: undefined };
+    res.json({
+      ...safeConversation,
+      messages,
+      // Extra flags for the client to decide whether to show editor controls
+      // and whether a "send" should fork first.
+      isOwner,
+      shared: conversation.shared,
+    });
   } catch (err) {
     next(err);
   }
@@ -100,7 +113,7 @@ router.patch('/:id', async (req, res, next) => {
     if (!conversation || !ownsConversation(req, conversation))
       return res.status(404).json({ error: 'Conversation not found' });
 
-    const { title, modelId, visionModelId } = req.body || {};
+    const { title, modelId, visionModelId, shared } = req.body || {};
     if (modelId && !getModel(modelId)) return res.status(400).json({ error: 'Unknown modelId' });
     if (visionModelId) {
       const vm = getModel(visionModelId);
@@ -112,8 +125,61 @@ router.patch('/:id', async (req, res, next) => {
     if (typeof title === 'string' && title.trim()) update.title = title.trim().slice(0, 80);
     if (modelId) update.modelId = modelId;
     if (visionModelId) update.visionModelId = visionModelId;
+    if (typeof shared === 'boolean') {
+      update.shared = shared;
+      update.sharedAt = shared ? new Date() : null;
+    }
     const updated = await Conversation.findByIdAndUpdate(req.params.id, update, { new: true });
     res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/conversations/:id/fork — create a private copy of a shared chat.
+// Anyone can call this on a shared conversation; the copy is owned by the caller.
+router.post('/:id/fork', async (req, res, next) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ error: 'Conversation not found' });
+    const source = await Conversation.findById(req.params.id).lean();
+    if (!source || !source.shared)
+      return res.status(404).json({ error: 'Conversation not found' });
+    const owner = ownerId(req);
+    if (!owner) return res.status(400).json({ error: 'Authentication required' });
+
+    const forked = await Conversation.create({
+      title: source.title,
+      modelId: source.modelId,
+      ...(source.visionModelId ? { visionModelId: source.visionModelId } : {}),
+      forkedFrom: source._id,
+      ...owner,
+    });
+
+    const sourceMessages = await Message.find({ conversationId: source._id })
+      .sort({ createdAt: 1 })
+      .lean();
+    if (sourceMessages.length > 0) {
+      await Message.insertMany(
+        sourceMessages.map((m) => ({
+          conversationId: forked._id,
+          role: m.role,
+          content: m.content,
+          modelId: m.modelId,
+          attachments: m.attachments,
+          usage: m.usage,
+          visionUsage: m.visionUsage,
+          error: m.error,
+          artifactEdit: m.artifactEdit,
+          ...owner,
+        }))
+      );
+    }
+
+    const messages = await Message.find({ conversationId: forked._id })
+      .sort({ createdAt: 1 })
+      .lean();
+    res.status(201).json({ ...forked.toObject(), messages, isOwner: true, shared: false });
   } catch (err) {
     next(err);
   }

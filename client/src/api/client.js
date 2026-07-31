@@ -50,6 +50,10 @@ export const api = {
   getConversation: (id) => request(`/conversations/${id}`),
   updateConversation: (id, patch) =>
     request(`/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  shareConversation: (id, shared) =>
+    request(`/conversations/${id}`, { method: 'PATCH', body: JSON.stringify({ shared }) }),
+  forkConversation: (id) =>
+    request(`/conversations/${id}/fork`, { method: 'POST' }),
   deleteConversation: (id) => request(`/conversations/${id}`, { method: 'DELETE' }),
   // Point-and-edit: replace one element of an artifact in place. `start`/`end`
   // are character offsets into the stored artifact code and `snippet` is what's

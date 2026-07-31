@@ -9,6 +9,7 @@ export default function Sidebar() {
   const {
     conversations,
     currentId,
+    currentConversationIsOwner,
     selectConversation,
     newChat,
     deleteConversation,
@@ -101,17 +102,19 @@ export default function Sidebar() {
                     {timeAgo(c.lastMessageAt)}
                   </span>
                 </a>
-                <button
-                  type="button"
-                  title="Delete chat"
-                  className="hidden shrink-0 rounded p-0.5 text-zinc-500 hover:text-rose-400 group-hover:block"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    deleteConversation(c._id);
-                  }}
-                >
-                  <Trash2 size={13} />
-                </button>
+                {(c._id !== currentId || currentConversationIsOwner) && (
+                  <button
+                    type="button"
+                    title="Delete chat"
+                    className="hidden shrink-0 rounded p-0.5 text-zinc-500 hover:text-rose-400 group-hover:block"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteConversation(c._id);
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
               </div>
             ))}
             {conversations.length === 0 && (

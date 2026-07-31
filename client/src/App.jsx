@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Check, Link2, PanelLeft, Pencil, X, Zap } from 'lucide-react';
+import { Globe, Link2, PanelLeft, Pencil, X, Zap } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from './store/useStore.js';
 import { formatCost, formatTokens, messageCost } from './lib/usage.js';
-import { onRouteChange, shareUrl } from './lib/router.js';
-import { copyToClipboard } from './lib/clipboard.js';
+import { onRouteChange } from './lib/router.js';
 import Sidebar from './components/Sidebar.jsx';
 import MessageList from './components/MessageList.jsx';
 import Composer from './components/Composer.jsx';
@@ -13,6 +12,7 @@ import ArtifactPanel from './components/ArtifactPanel.jsx';
 import DropZone from './components/DropZone.jsx';
 import AttachmentViewer from './components/AttachmentViewer.jsx';
 import AuthModal from './components/AuthModal.jsx';
+import ShareModal from './components/ShareModal.jsx';
 
 function SessionUsage() {
   const { messages, modelById } = useStore();
@@ -46,61 +46,37 @@ function SessionUsage() {
   );
 }
 
-// Every saved chat lives at /c/<id> — this copies that link for sharing or
-// bookmarking. The address bar already shows it; this is the one-click version.
-function ShareLink() {
+function ShareLinkButton() {
   const currentId = useStore((s) => s.currentId);
-  const [state, setState] = useState('idle'); // idle | copied | failed
-
-  // "Copied" is transient feedback; "failed" sticks around because it exposes
-  // the URL for manual copying (some browsers block clipboard writes).
-  useEffect(() => {
-    if (state !== 'copied') return undefined;
-    const timer = setTimeout(() => setState('idle'), 2000);
-    return () => clearTimeout(timer);
-  }, [state]);
-
-  useEffect(() => setState('idle'), [currentId]);
+  const openShareModal = useStore((s) => s.openShareModal);
+  const shared = useStore((s) => s.currentConversationShared);
 
   if (!currentId) return null;
-  const url = shareUrl(currentId);
 
   return (
-    <>
-      {state === 'failed' && (
-        <input
-          readOnly
-          autoFocus
-          value={url}
-          onFocus={(e) => e.target.select()}
-          className="w-64 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 outline-none"
-        />
+    <button
+      type="button"
+      onClick={openShareModal}
+      title="Share this chat"
+      className={clsx(
+        'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
+        shared
+          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+          : 'border-white/[0.07] bg-white/[0.03] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200'
       )}
-      <button
-        type="button"
-        onClick={async () => setState((await copyToClipboard(url)) ? 'copied' : 'failed')}
-        title={state === 'failed' ? `Copy it manually: ${url}` : `Copy link to this chat\n${url}`}
-        className={clsx(
-          'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
-          state === 'copied'
-            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-            : state === 'failed'
-              ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
-              : 'border-white/[0.07] bg-white/[0.03] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200'
-        )}
-      >
-        {state === 'copied' ? <Check size={12} /> : <Link2 size={12} />}
-        {state === 'copied' ? 'Link copied' : state === 'failed' ? 'Copy manually' : 'Share link'}
-      </button>
-    </>
+    >
+      {shared ? <Globe size={12} /> : <Link2 size={12} />}
+      {shared ? 'Shared' : 'Share link'}
+    </button>
   );
 }
 
 function TopBar() {
-  const { currentId, conversations, renameConversation, toggleSidebar } = useStore();
+  const { currentId, conversations, renameConversation, toggleSidebar, currentConversationIsOwner } = useStore();
   const convo = conversations.find((c) => c._id === currentId);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const isOwner = currentConversationIsOwner;
 
   const commit = () => {
     const title = draft.trim();
@@ -142,15 +118,21 @@ function TopBar() {
         ) : (
           <button
             type="button"
-            title="Rename chat"
+            title={isOwner ? 'Rename chat' : 'Shared chat — only the owner can rename'}
             onClick={() => {
+              if (!isOwner) return;
               setDraft(convo.title);
               setEditing(true);
             }}
-            className="group flex min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-white/5"
+            className={clsx(
+              'group flex min-w-0 items-center gap-2 rounded-lg px-2 py-1.5',
+              isOwner && 'hover:bg-white/5'
+            )}
           >
             <span className="truncate text-sm font-medium text-zinc-200">{convo.title}</span>
-            <Pencil size={12} className="shrink-0 text-zinc-600 opacity-0 transition-opacity group-hover:opacity-100" />
+            {isOwner && (
+              <Pencil size={12} className="shrink-0 text-zinc-600 opacity-0 transition-opacity group-hover:opacity-100" />
+            )}
           </button>
         )
       ) : (
@@ -158,7 +140,7 @@ function TopBar() {
       )}
 
       <div className="ml-auto flex items-center gap-2">
-        <ShareLink />
+        <ShareLinkButton />
         <SessionUsage />
       </div>
     </header>
@@ -182,6 +164,8 @@ export default function App() {
   const linkError = useStore((s) => s.linkError);
   const dismissLinkError = useStore((s) => s.dismissLinkError);
   const handleRouteChange = useStore((s) => s.handleRouteChange);
+  const currentConversationIsOwner = useStore((s) => s.currentConversationIsOwner);
+  const currentConversationShared = useStore((s) => s.currentConversationShared);
 
   useEffect(() => {
     bootstrap();
@@ -215,6 +199,15 @@ export default function App() {
             </button>
           </div>
         )}
+        {currentConversationShared && !currentConversationIsOwner && (
+          <div className="flex items-center justify-center gap-2 border-b border-sky-500/20 bg-sky-500/10 px-4 py-2 text-xs text-sky-300">
+            <Globe size={13} />
+            <span>
+              You’re viewing a shared chat. Send a message to create your own private copy
+              and continue the conversation.
+            </span>
+          </div>
+        )}
         <div className="relative flex min-h-0 flex-1">
           <DropZone>
             {messages.length === 0 ? <EmptyState /> : <MessageList />}
@@ -225,6 +218,7 @@ export default function App() {
       </main>
       <AttachmentViewer key={activeAttachment?.dataUrl?.slice(-12) || 'none'} />
       <AuthModal />
+      <ShareModal />
     </div>
   );
 }

@@ -55,6 +55,10 @@ export const useStore = create((set, get) => ({
   authInfo: null,
   pendingOtpEmail: null,
   pendingMessage: null, // { content, attachments } queued when anonymous limit is hit
+  // sharing
+  shareModalOpen: false,
+  currentConversationIsOwner: false,
+  currentConversationShared: false,
 
   // ---------- helpers ----------
   modelById: (id) => get().models.find((m) => m.id === id),
@@ -70,7 +74,7 @@ export const useStore = create((set, get) => ({
   },
 
   // ---------- bootstrap ----------
-  bootstrap: async () => {
+  bootstrap: async ({ skipDeepLink = false } = {}) => {
     try {
       const sessionId = getOrCreateSessionId();
       setApiSessionId(sessionId);
@@ -94,7 +98,7 @@ export const useStore = create((set, get) => ({
         booted: true,
       });
       // Deep link: /c/<id> opens that chat straight away (bookmark / shared link).
-      const routeId = currentRouteId();
+      const routeId = skipDeepLink ? null : currentRouteId();
       if (routeId) await get().selectConversation(routeId, { updateUrl: false });
     } catch (err) {
       set({ bootError: err.message, booted: true });
@@ -115,6 +119,18 @@ export const useStore = create((set, get) => ({
     set({ authModalOpen: true, authMode: mode, authError: null, authInfo: null }),
   closeAuthModal: () =>
     set({ authModalOpen: false, authError: null, authInfo: null, pendingOtpEmail: null }),
+
+  openShareModal: () => set({ shareModalOpen: true }),
+  closeShareModal: () => set({ shareModalOpen: false }),
+  setConversationShared: async (shared) => {
+    const id = get().currentId;
+    if (!id) return;
+    const convo = await api.shareConversation(id, shared);
+    set((s) => ({
+      currentConversationShared: convo.shared,
+      conversations: s.conversations.map((c) => (c._id === id ? convo : c)),
+    }));
+  },
 
   refreshAuth: async () => {
     try {
@@ -273,8 +289,13 @@ export const useStore = create((set, get) => ({
       messages: [],
       currentId: null,
       pendingMessage: null,
+      linkError: null,
     });
-    await get().bootstrap();
+    // After logout, the previous chat is owned by the now-signed-out account;
+    // trying to deep-link back into it would fail and show a scary error.
+    // Reload global state (models, anonymous limit) and start a fresh new chat.
+    await get().bootstrap({ skipDeepLink: true });
+    get().newChat({ updateUrl: true });
   },
 
   _flushPendingMessage: async () => {
@@ -351,6 +372,8 @@ export const useStore = create((set, get) => ({
       attachments: [],
       attachError: null,
       linkError: null,
+      currentConversationIsOwner: false,
+      currentConversationShared: false,
     });
     try {
       const convo = await api.getConversation(id);
@@ -360,6 +383,8 @@ export const useStore = create((set, get) => ({
       set((s) => ({
         messages,
         selectedModelId: convo.modelId,
+        currentConversationIsOwner: Boolean(convo.isOwner),
+        currentConversationShared: Boolean(convo.shared),
         // A link opened in another tab/window may point at a chat this list
         // hasn't seen yet — fold it in so the sidebar and title bar match.
         conversations: s.conversations.some((c) => c._id === id)
@@ -368,7 +393,7 @@ export const useStore = create((set, get) => ({
       }));
     } catch (err) {
       if (get().currentId !== id) return;
-      set({ currentId: null, messages: [], linkError: `Can't open that chat link — ${err.message}` });
+      set({ currentId: null, messages: [], currentConversationIsOwner: false, currentConversationShared: false, linkError: `Can't open that chat link — ${err.message}` });
       navigateTo(null, { replace: true });
     }
   },
@@ -383,6 +408,8 @@ export const useStore = create((set, get) => ({
       attachments: [],
       attachError: null,
       linkError: null,
+      currentConversationIsOwner: false,
+      currentConversationShared: false,
     });
   },
 
@@ -405,8 +432,8 @@ export const useStore = create((set, get) => ({
   // ---------- model switching (works mid-conversation) ----------
   setModel: async (modelId) => {
     set({ selectedModelId: modelId });
-    const { currentId, conversations } = get();
-    if (!currentId) return;
+    const { currentId, conversations, currentConversationIsOwner } = get();
+    if (!currentId || !currentConversationIsOwner) return;
     const convo = await api.updateConversation(currentId, { modelId });
     set({
       conversations: conversations.map((c) => (c._id === currentId ? convo : c)),
@@ -417,8 +444,8 @@ export const useStore = create((set, get) => ({
   // Works before the conversation exists: the draft is persisted on first send.
   setVisionModel: async (visionModelId) => {
     set({ selectedVisionModelId: visionModelId });
-    const { currentId, conversations } = get();
-    if (!currentId) return;
+    const { currentId, conversations, currentConversationIsOwner } = get();
+    if (!currentId || !currentConversationIsOwner) return;
     const convo = await api.updateConversation(currentId, { visionModelId });
     set({
       conversations: conversations.map((c) => (c._id === currentId ? convo : c)),
@@ -454,6 +481,23 @@ export const useStore = create((set, get) => ({
       set((s) => ({ currentId, conversations: [convo, ...s.conversations], messages: [] }));
       // The chat now has a permanent link — swap `/` for it (replace, not push,
       // so Back leaves the app instead of returning to an empty new chat).
+      navigateTo(currentId, { replace: true });
+    }
+
+    // Viewing a shared chat we don't own: fork it to a private copy before writing.
+    // This guarantees the original chat ID is never reused for someone else's messages.
+    if (currentId && !get().currentConversationIsOwner) {
+      const forked = await api.forkConversation(currentId);
+      currentId = forked._id;
+      set((s) => ({
+        currentId,
+        messages: forked.messages,
+        conversations: s.conversations.some((c) => c._id === currentId)
+          ? s.conversations
+          : [forked, ...s.conversations],
+        currentConversationIsOwner: true,
+        currentConversationShared: false,
+      }));
       navigateTo(currentId, { replace: true });
     }
 

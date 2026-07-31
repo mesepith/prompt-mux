@@ -13,6 +13,11 @@ const conversationSchema = new mongoose.Schema(
     // Ownership. Exactly one of userId or sessionId is set.
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', sparse: true, index: true },
     sessionId: { type: String, sparse: true, index: true },
+    // Public sharing: when true, anyone with the link can view and fork.
+    shared: { type: Boolean, default: false },
+    sharedAt: { type: Date },
+    // Optional lineage for conversations created by forking a shared chat.
+    forkedFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'Conversation', sparse: true, index: true },
   },
   { timestamps: true }
 );

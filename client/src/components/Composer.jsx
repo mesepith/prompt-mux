@@ -15,6 +15,8 @@ export default function Composer() {
     selectedVisionModelId,
     currentId,
     conversations,
+    currentConversationIsOwner,
+    currentConversationShared,
     setModel,
     setVisionModel,
     attachments,
@@ -204,9 +206,11 @@ export default function Composer() {
           }}
           onKeyDown={onKeyDown}
           placeholder={
-            attachments.length
-              ? 'Ask about the attached file(s)…'
-              : 'Ask anything, or drag & drop images / PDFs / docs…'
+            currentId && currentConversationShared && !currentConversationIsOwner
+              ? 'Send a message to create your own copy of this shared chat…'
+              : attachments.length
+                ? 'Ask about the attached file(s)…'
+                : 'Ask anything, or drag & drop images / PDFs / docs…'
           }
           className="max-h-[200px] w-full resize-none bg-transparent px-5 pb-2 pt-4 text-[15px] text-zinc-100 placeholder-zinc-500 outline-none"
         />

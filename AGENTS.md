@@ -80,6 +80,13 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   also chat anonymously up to `ANONYMOUS_MESSAGE_LIMIT` total messages per browser session
   (`pm_session_id` in localStorage); after the limit, the UI prompts for login and the
   server merges their anonymous chats into the new account.
+- **Shared chats.** Conversations are private by default. The owner can toggle
+  `shared: true` (`PATCH /api/conversations/:id`). When shared, `GET /api/conversations/:id`
+  is readable by anyone, but all writes (messages, rename, delete, artifact-edit) remain
+  owner-only. A public viewer who sends a message forks the chat first via
+  `POST /api/conversations/:id/fork`; the original conversation ID is never reused for
+  another user's messages. The client tracks `isOwner`/`shared` from the GET response to
+  show/hide editor controls and to decide whether to fork before writing.
 - **Point & edit** (surgical artifact editing) — the one invariant: *the model rewrites a
   fragment, the server splices it; nobody regenerates the document*.
   - `client/src/lib/htmlNodes.js` scans artifact source into elements with exact
