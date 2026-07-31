@@ -478,7 +478,16 @@ export const useStore = create((set, get) => ({
         get().selectedVisionModelId || undefined
       );
       currentId = convo._id;
-      set((s) => ({ currentId, conversations: [convo, ...s.conversations], messages: [] }));
+      set((s) => ({
+        currentId,
+        conversations: [convo, ...s.conversations],
+        messages: [],
+        // We just created it, so we own it. Without this the fork branch below
+        // sees the store default (false), tries to fork a chat that isn't
+        // shared, gets a 404 and the message is never sent.
+        currentConversationIsOwner: true,
+        currentConversationShared: false,
+      }));
       // The chat now has a permanent link — swap `/` for it (replace, not push,
       // so Back leaves the app instead of returning to an empty new chat).
       navigateTo(currentId, { replace: true });
