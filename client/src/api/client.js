@@ -1,17 +1,39 @@
+let sessionId = null;
+
+export function setApiSessionId(id) {
+  sessionId = id || null;
+}
+
+export function getApiSessionId() {
+  return sessionId;
+}
+
+function defaultHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (sessionId) headers['X-Session-Id'] = sessionId;
+  return headers;
+}
+
 async function request(path, options = {}) {
   const res = await fetch(`/api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: defaultHeaders(),
     ...options,
   });
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let code = null;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
+      if (body?.code) code = body.code;
     } catch {
       /* keep default message */
     }
-    throw new Error(message);
+    const err = new Error(message);
+    err.status = res.status;
+    err.code = code;
+    throw err;
   }
   return res.json();
 }
@@ -37,6 +59,40 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  // Auth
+  authMe: () => request('/auth/me'),
+  login: (email, password) =>
+    request('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, sessionId }),
+    }),
+  register: (email, password) =>
+    request('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  verifyEmail: (email, otp) =>
+    request('/auth/verify-email', {
+      method: 'POST',
+      body: JSON.stringify({ email, otp, sessionId }),
+    }),
+  forgotPassword: (email) =>
+    request('/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+  resetPassword: (email, otp, password) =>
+    request('/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ email, otp, password, sessionId }),
+    }),
+  resendOtp: (email, purpose) =>
+    request('/auth/resend', {
+      method: 'POST',
+      body: JSON.stringify({ email, purpose }),
+    }),
+  logout: () => request('/auth/logout', { method: 'POST' }),
 };
 
 /**
@@ -46,7 +102,8 @@ export const api = {
 export async function streamMessage({ conversationId, content, modelId, images, pdfs, docs, signal, onEvent }) {
   const res = await fetch(`/api/conversations/${conversationId}/messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: defaultHeaders(),
     body: JSON.stringify({
       content,
       modelId,
@@ -58,13 +115,18 @@ export async function streamMessage({ conversationId, content, modelId, images, 
   });
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let code = null;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
+      if (body?.code) code = body.code;
     } catch {
       /* keep default */
     }
-    throw new Error(message);
+    const err = new Error(message);
+    err.status = res.status;
+    err.code = code;
+    throw err;
   }
 
   const reader = res.body.getReader();

@@ -47,12 +47,15 @@ const messageSchema = new mongoose.Schema(
     // Set on the message pair produced by point-and-edit (POST /artifact-edit):
     // the user's instruction, the element it targeted, and the message whose
     // artifact was edited. Used to badge the pair in the UI and to trim older
-    // copies of the same artifact out of provider history.
+    // edit copies out of provider history.
     artifactEdit: {
       instruction: { type: String },
       target: { type: String },
       sourceMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
     },
+    // Ownership. Mirrors the parent conversation's owner.
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', sparse: true, index: true },
+    sessionId: { type: String, sparse: true, index: true },
   },
   { timestamps: true }
 );

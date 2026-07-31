@@ -12,6 +12,7 @@ import EmptyState from './components/EmptyState.jsx';
 import ArtifactPanel from './components/ArtifactPanel.jsx';
 import DropZone from './components/DropZone.jsx';
 import AttachmentViewer from './components/AttachmentViewer.jsx';
+import AuthModal from './components/AuthModal.jsx';
 
 function SessionUsage() {
   const { messages, modelById } = useStore();
@@ -223,6 +224,7 @@ export default function App() {
         </div>
       </main>
       <AttachmentViewer key={activeAttachment?.dataUrl?.slice(-12) || 'none'} />
+      <AuthModal />
     </div>
   );
 }

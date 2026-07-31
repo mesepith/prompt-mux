@@ -1,60 +1,26 @@
-import 'dotenv/config';
-import express from 'express';
-import crypto from 'node:crypto';
+import dotenv from 'dotenv';
 import path from 'node:path';
-import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { connectDB } from './config/db.js';
-import modelsRouter from './routes/models.js';
-import conversationsRouter from './routes/conversations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+import express from 'express';
+import fs from 'node:fs';
+import cookieParser from 'cookie-parser';
+import { connectDB } from './config/db.js';
+import { authMiddleware } from './middleware/auth.js';
+import modelsRouter from './routes/models.js';
+import authRouter from './routes/auth.js';
+import conversationsRouter from './routes/conversations.js';
+
 const app = express();
 const PORT = process.env.PORT || 5050;
 
 // NO CORS by design. The client is always same-origin — Express serves the built
 // app in production, and Vite proxies /api in dev — so an Access-Control-Allow-Origin
 // header would only ever help someone else's page read this user's chats.
-// (There is no auth on the API, so `cors()` made every conversation readable by any
-// website the user happened to have open.) Add a narrowly scoped cors() here only if
-// you ever host the client on a different origin, never `cors()` with no options.
-
-const AUTH_USER = process.env.APP_USER || 'promptmux';
-const AUTH_PASSWORD = process.env.APP_PASSWORD || '';
-
-const safeEqual = (a, b) => {
-  const bufA = Buffer.from(String(a));
-  const bufB = Buffer.from(String(b));
-  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
-};
-
-/**
- * Optional shared-password gate (HTTP Basic). PromptMux has no user accounts —
- * the whole workspace is one person's chats, including text extracted from every
- * PDF they uploaded — so a single password is what stops a reachable host from
- * handing all of it to anyone who asks. Set APP_PASSWORD in server/.env to turn
- * it on. Unset leaves the server open, which is fine on a laptop and not on a
- * public box; the startup warning says so.
- *
- * Deliberately first in the chain: unauthenticated callers shouldn't reach the
- * 30 MB JSON parser, the API, or the built client.
- */
-app.use((req, res, next) => {
-  if (!AUTH_PASSWORD) return next();
-  if (req.path === '/api/health') return next(); // for deploy/monitoring checks
-  const [scheme, encoded] = (req.headers.authorization || '').split(' ');
-  if (scheme === 'Basic' && encoded) {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    const split = decoded.indexOf(':');
-    if (split !== -1) {
-      const user = decoded.slice(0, split);
-      const password = decoded.slice(split + 1);
-      if (safeEqual(user, AUTH_USER) && safeEqual(password, AUTH_PASSWORD)) return next();
-    }
-  }
-  res.set('WWW-Authenticate', 'Basic realm="PromptMux", charset="UTF-8"');
-  res.status(401).json({ error: 'Authentication required' });
-});
+// Authentication is now per-user via JWT cookie + email/password login.
 
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
@@ -63,9 +29,12 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '30mb' })); // generous: base64 image uploads
+app.use(cookieParser());
+app.use(authMiddleware);
 
 app.get('/api/health', (req, res) => res.json({ ok: true, name: 'prompt-mux' }));
 app.use('/api/models', modelsRouter);
+app.use('/api/auth', authRouter);
 app.use('/api/conversations', conversationsRouter);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
@@ -90,15 +59,6 @@ connectDB()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`[server] listening on http://localhost:${PORT}`);
-      if (AUTH_PASSWORD) console.log(`[auth] password required (user "${AUTH_USER}")`);
-      else
-        console.warn(
-          `[auth] APP_PASSWORD is not set — anything that can reach port ${PORT} can read every ` +
-            'chat, including text from uploaded PDFs. Fine if a proxy in front already requires ' +
-            'credentials (nginx auth_basic / .htaccess, a VPN) AND this port is not reachable ' +
-            'directly — note that also means other processes on the same host. Otherwise set ' +
-            'APP_PASSWORD in server/.env.'
-        );
     });
   })
   .catch((err) => {

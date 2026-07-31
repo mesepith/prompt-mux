@@ -10,6 +10,9 @@ const conversationSchema = new mongoose.Schema(
     // the selected chat model has no image support (two-model setup).
     visionModelId: { type: String },
     lastMessageAt: { type: Date, default: Date.now },
+    // Ownership. Exactly one of userId or sessionId is set.
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', sparse: true, index: true },
+    sessionId: { type: String, sparse: true, index: true },
   },
   { timestamps: true }
 );

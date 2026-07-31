@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { useStore } from '../store/useStore.js';
 import { timeAgo } from '../lib/artifacts.js';
 import { conversationPath } from '../lib/router.js';
+import AuthButton from './AuthButton.jsx';
 
 export default function Sidebar() {
   const {
@@ -125,6 +126,9 @@ export default function Sidebar() {
 
         {/* Footer */}
         <div className="border-t border-white/[0.06] px-4 py-3">
+          <div className="mb-3">
+            <AuthButton />
+          </div>
           <div className="flex flex-wrap items-center gap-1.5">
             {companies.map((c) => (
               <span

@@ -25,13 +25,24 @@ import {
   DOC_CURRENT_MAX_CHARS,
   DOC_HISTORY_MAX_CHARS,
 } from '../lib/doc.js';
+import { ownerFilter, ownsConversation } from '../middleware/auth.js';
+import { audit } from '../models/AuditLog.js';
 
 const router = Router();
+
+const ANONYMOUS_MESSAGE_LIMIT = Number(process.env.ANONYMOUS_MESSAGE_LIMIT) || 3;
+
+function ownerId(req) {
+  if (req.userId) return { userId: req.userId };
+  if (req.sessionId) return { sessionId: req.sessionId };
+  return null;
+}
 
 // GET /api/conversations — sidebar list, newest first.
 router.get('/', async (req, res, next) => {
   try {
-    const conversations = await Conversation.find().sort({ lastMessageAt: -1 }).lean();
+    const filter = ownerFilter(req);
+    const conversations = await Conversation.find(filter).sort({ lastMessageAt: -1 }).lean();
     res.json(conversations);
   } catch (err) {
     next(err);
@@ -49,9 +60,12 @@ router.post('/', async (req, res, next) => {
       if (!vm.vision)
         return res.status(400).json({ error: `${vm.name} does not support image input` });
     }
+    const owner = ownerId(req);
+    if (!owner) return res.status(400).json({ error: 'Authentication required' });
     const conversation = await Conversation.create({
       modelId,
       ...(visionModelId ? { visionModelId } : {}),
+      ...owner,
     });
     res.status(201).json(conversation);
   } catch (err) {
@@ -66,7 +80,8 @@ router.get('/:id', async (req, res, next) => {
     if (!mongoose.isValidObjectId(req.params.id))
       return res.status(404).json({ error: 'Conversation not found' });
     const conversation = await Conversation.findById(req.params.id).lean();
-    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    if (!conversation || !ownsConversation(req, conversation))
+      return res.status(404).json({ error: 'Conversation not found' });
     const messages = await Message.find({ conversationId: conversation._id })
       .sort({ createdAt: 1 })
       .lean();
@@ -79,6 +94,12 @@ router.get('/:id', async (req, res, next) => {
 // PATCH /api/conversations/:id — rename, switch model, set vision (file-model) model.
 router.patch('/:id', async (req, res, next) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ error: 'Conversation not found' });
+    const conversation = await Conversation.findById(req.params.id);
+    if (!conversation || !ownsConversation(req, conversation))
+      return res.status(404).json({ error: 'Conversation not found' });
+
     const { title, modelId, visionModelId } = req.body || {};
     if (modelId && !getModel(modelId)) return res.status(400).json({ error: 'Unknown modelId' });
     if (visionModelId) {
@@ -91,11 +112,8 @@ router.patch('/:id', async (req, res, next) => {
     if (typeof title === 'string' && title.trim()) update.title = title.trim().slice(0, 80);
     if (modelId) update.modelId = modelId;
     if (visionModelId) update.visionModelId = visionModelId;
-    const conversation = await Conversation.findByIdAndUpdate(req.params.id, update, {
-      new: true,
-    });
-    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
-    res.json(conversation);
+    const updated = await Conversation.findByIdAndUpdate(req.params.id, update, { new: true });
+    res.json(updated);
   } catch (err) {
     next(err);
   }
@@ -104,8 +122,11 @@ router.patch('/:id', async (req, res, next) => {
 // DELETE /api/conversations/:id — removes conversation and its messages.
 router.delete('/:id', async (req, res, next) => {
   try {
-    const conversation = await Conversation.findByIdAndDelete(req.params.id);
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ error: 'Conversation not found' });
+    const conversation = await Conversation.findOne({ _id: req.params.id, ...ownerFilter(req) });
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    await Conversation.findByIdAndDelete(conversation._id);
     await Message.deleteMany({ conversationId: conversation._id });
     res.json({ ok: true });
   } catch (err) {
@@ -148,7 +169,8 @@ router.post('/:id/artifact-edit', async (req, res, next) => {
       return res.status(404).json({ error: 'Message not found in this conversation' });
 
     const conversation = await Conversation.findById(req.params.id);
-    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    if (!conversation || !ownsConversation(req, conversation))
+      return res.status(404).json({ error: 'Conversation not found' });
 
     const sourceMessage = await Message.findById(messageId);
     if (!sourceMessage || String(sourceMessage.conversationId) !== String(conversation._id))
@@ -219,11 +241,13 @@ router.post('/:id/artifact-edit', async (req, res, next) => {
       target: label,
       sourceMessageId: sourceMessage._id,
     };
+    const owner = ownerId(req) || {};
     const userMessage = await Message.create({
       conversationId: conversation._id,
       role: 'user',
       content: label ? `Edit \`${label}\`: ${text}` : `Edit selected element: ${text}`,
       artifactEdit: meta,
+      ...owner,
     });
     const message = await Message.create({
       conversationId: conversation._id,
@@ -236,6 +260,7 @@ router.post('/:id/artifact-edit', async (req, res, next) => {
       ].join('\n'),
       ...(usage ? { usage } : {}),
       artifactEdit: meta,
+      ...owner,
     });
 
     conversation.lastMessageAt = new Date();
@@ -307,12 +332,26 @@ router.post('/:id/messages', async (req, res, next) => {
     }
 
     const conversation = await Conversation.findById(req.params.id);
-    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    if (!conversation || !ownsConversation(req, conversation))
+      return res.status(404).json({ error: 'Conversation not found' });
+
+    // Anonymous users can only send a limited total number of messages.
+    if (!req.userId && req.sessionId) {
+      const sent = await Message.countDocuments({ sessionId: req.sessionId, role: 'user' });
+      if (sent >= ANONYMOUS_MESSAGE_LIMIT) {
+        audit({ event: 'anonymous_limit_reached', sessionId: req.sessionId, req, metadata: { messageCount: sent, limit: ANONYMOUS_MESSAGE_LIMIT } });
+        return res.status(403).json({
+          error: 'Anonymous message limit reached. Please sign up or log in to continue.',
+          code: 'ANONYMOUS_LIMIT_REACHED',
+        });
+      }
+    }
 
     const model = getModel(modelId || conversation.modelId);
     if (!model) return res.status(400).json({ error: 'Unknown modelId' });
 
     const text = (content || '').trim();
+    const owner = ownerId(req) || {};
 
     // Save the user message (images stored as data URLs; PDFs stored as metadata
     // only — their actual reading happens via the vision-model flow below).
@@ -335,6 +374,7 @@ router.post('/:id/messages', async (req, res, next) => {
       role: 'user',
       content: text,
       ...(attachments.length ? { attachments } : {}),
+      ...owner,
     });
     const messageCount = await Message.countDocuments({ conversationId: conversation._id });
     conversation.modelId = model.id;
@@ -370,6 +410,7 @@ router.post('/:id/messages', async (req, res, next) => {
         ...(usage ? { usage } : {}),
         ...(visionUsage ? { visionUsage } : {}),
         ...(error ? { error } : {}),
+        ...owner,
       });
       send(error ? { type: 'error', error, message } : { type: 'done', message });
       res.end();

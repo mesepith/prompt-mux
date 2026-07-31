@@ -1,7 +1,19 @@
 import { create } from 'zustand';
-import { api, streamMessage } from '../api/client.js';
+import { api, streamMessage, setApiSessionId } from '../api/client.js';
 import { extractArtifacts } from '../lib/artifacts.js';
 import { currentRouteId, navigateTo } from '../lib/router.js';
+
+const SESSION_KEY = 'pm_session_id';
+
+function getOrCreateSessionId() {
+  if (typeof window === 'undefined') return null;
+  let id = window.localStorage.getItem(SESSION_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    window.localStorage.setItem(SESSION_KEY, id);
+  }
+  return id;
+}
 
 export const useStore = create((set, get) => ({
   // registry
@@ -32,6 +44,17 @@ export const useStore = create((set, get) => ({
   booted: false,
   bootError: null,
   linkError: null, // a shared/bookmarked /c/<id> link that no longer resolves
+  // auth
+  sessionId: null,
+  user: null,
+  anonymousUsage: null, // { messageCount, limit, blocked }
+  authModalOpen: false,
+  authMode: 'login', // 'login' | 'signup' | 'forgot'
+  authLoading: false,
+  authError: null,
+  authInfo: null,
+  pendingOtpEmail: null,
+  pendingMessage: null, // { content, attachments } queued when anonymous limit is hit
 
   // ---------- helpers ----------
   modelById: (id) => get().models.find((m) => m.id === id),
@@ -41,11 +64,21 @@ export const useStore = create((set, get) => ({
     return model ? get().companyById(model.company) : null;
   },
 
+  anonymousLimitReached: () => {
+    const u = get().anonymousUsage;
+    return !get().user && !!u && u.blocked;
+  },
+
   // ---------- bootstrap ----------
   bootstrap: async () => {
     try {
-      const [{ companies, models }, conversations] = await Promise.all([
+      const sessionId = getOrCreateSessionId();
+      setApiSessionId(sessionId);
+      set({ sessionId });
+
+      const [{ companies, models }, auth, conversations] = await Promise.all([
         api.models(),
+        api.authMe(),
         api.listConversations(),
       ]);
       const firstAvailable = models.find(
@@ -54,6 +87,8 @@ export const useStore = create((set, get) => ({
       set({
         companies,
         models,
+        user: auth.user,
+        anonymousUsage: auth.anonymous,
         conversations,
         selectedModelId: firstAvailable?.id || 'demo-artist',
         booted: true,
@@ -74,6 +109,182 @@ export const useStore = create((set, get) => ({
   },
 
   dismissLinkError: () => set({ linkError: null }),
+
+  // ---------- auth ----------
+  openAuthModal: (mode = 'login') =>
+    set({ authModalOpen: true, authMode: mode, authError: null, authInfo: null }),
+  closeAuthModal: () =>
+    set({ authModalOpen: false, authError: null, authInfo: null, pendingOtpEmail: null }),
+
+  refreshAuth: async () => {
+    try {
+      const auth = await api.authMe();
+      set({ user: auth.user, anonymousUsage: auth.anonymous });
+    } catch (err) {
+      // ignore — the next request will fail cleanly
+    }
+  },
+
+  login: async ({ email, password }) => {
+    set({ authLoading: true, authError: null });
+    try {
+      const result = await api.login(email, password);
+      if (result.requiresVerification) {
+        set({
+          authLoading: false,
+          authMode: 'verify',
+          pendingOtpEmail: result.email,
+          authInfo: 'Your email is not verified yet. A new code has been sent — enter it below.',
+        });
+        return { ok: true, requiresVerification: true };
+      }
+      const { user } = result;
+      const conversations = await api.listConversations();
+      set({
+        user,
+        anonymousUsage: null,
+        conversations,
+        authLoading: false,
+        authModalOpen: false,
+        authError: null,
+      });
+      await get()._flushPendingMessage();
+      return { ok: true };
+    } catch (err) {
+      set({ authLoading: false, authError: err.message });
+      return { ok: false, error: err.message };
+    }
+  },
+
+  register: async ({ email, password }) => {
+    set({ authLoading: true, authError: null });
+    try {
+      await api.register(email, password);
+      set({
+        authLoading: false,
+        authMode: 'verify',
+        pendingOtpEmail: email,
+        authInfo: 'Enter the 6-digit code sent to your email.',
+      });
+      return { ok: true };
+    } catch (err) {
+      set({ authLoading: false, authError: err.message });
+      return { ok: false, error: err.message };
+    }
+  },
+
+  verifyEmail: async ({ otp }) => {
+    const email = get().pendingOtpEmail;
+    if (!email) {
+      set({ authError: 'Session expired. Please start again.' });
+      return { ok: false };
+    }
+    set({ authLoading: true, authError: null });
+    try {
+      const { user } = await api.verifyEmail(email, otp);
+      const conversations = await api.listConversations();
+      set({
+        user,
+        anonymousUsage: null,
+        conversations,
+        authLoading: false,
+        authModalOpen: false,
+        authError: null,
+        pendingOtpEmail: null,
+        authInfo: null,
+      });
+      await get()._flushPendingMessage();
+      return { ok: true };
+    } catch (err) {
+      set({ authLoading: false, authError: err.message });
+      return { ok: false, error: err.message };
+    }
+  },
+
+  forgotPassword: async ({ email }) => {
+    set({ authLoading: true, authError: null });
+    try {
+      await api.forgotPassword(email);
+      set({
+        authLoading: false,
+        authMode: 'reset',
+        pendingOtpEmail: email,
+        authInfo: 'Enter the 6-digit code and your new password.',
+      });
+      return { ok: true };
+    } catch (err) {
+      set({ authLoading: false, authError: err.message });
+      return { ok: false, error: err.message };
+    }
+  },
+
+  resetPassword: async ({ otp, password }) => {
+    const email = get().pendingOtpEmail;
+    if (!email) {
+      set({ authError: 'Session expired. Please start again.' });
+      return { ok: false };
+    }
+    set({ authLoading: true, authError: null });
+    try {
+      const { user } = await api.resetPassword(email, otp, password);
+      const conversations = await api.listConversations();
+      set({
+        user,
+        anonymousUsage: null,
+        conversations,
+        authLoading: false,
+        authModalOpen: false,
+        authError: null,
+        pendingOtpEmail: null,
+        authInfo: null,
+      });
+      await get()._flushPendingMessage();
+      return { ok: true };
+    } catch (err) {
+      set({ authLoading: false, authError: err.message });
+      return { ok: false, error: err.message };
+    }
+  },
+
+  resendOtp: async () => {
+    const email = get().pendingOtpEmail;
+    if (!email) return { ok: false, error: 'No pending verification' };
+    const purpose = get().authMode === 'reset' ? 'forgot-password' : 'register';
+    set({ authLoading: true, authError: null });
+    try {
+      await api.resendOtp(email, purpose);
+      set({ authLoading: false, authInfo: 'A new code has been sent.' });
+      return { ok: true };
+    } catch (err) {
+      set({ authLoading: false, authError: err.message });
+      return { ok: false, error: err.message };
+    }
+  },
+
+  logout: async () => {
+    await api.logout();
+    const sessionId = crypto.randomUUID();
+    window.localStorage.setItem(SESSION_KEY, sessionId);
+    setApiSessionId(sessionId);
+    set({
+      user: null,
+      sessionId,
+      conversations: [],
+      messages: [],
+      currentId: null,
+      pendingMessage: null,
+    });
+    await get().bootstrap();
+  },
+
+  _flushPendingMessage: async () => {
+    const pending = get().pendingMessage;
+    if (!pending) return;
+    set({ pendingMessage: null });
+    // Restore attachments so sendMessage can consume them.
+    set({ attachments: pending.attachments });
+    await get().sendMessage(pending.content);
+  },
 
   // ---------- attachments (composer + drop zone) ----------
   addAttachments: (files) => {
@@ -217,8 +428,19 @@ export const useStore = create((set, get) => ({
   // ---------- sending ----------
   sendMessage: async (content) => {
     const text = content.trim();
-    const { streaming, selectedModelId, attachments } = get();
+    const { streaming, selectedModelId, attachments, user } = get();
     if ((!text && !attachments.length) || streaming) return;
+
+    // Anonymous message limit: queue the message and ask the user to log in.
+    if (!user && get().anonymousLimitReached()) {
+      set({
+        pendingMessage: { content: text, attachments: [...attachments] },
+        authModalOpen: true,
+        authMode: 'login',
+        authError: 'You have reached the free message limit. Sign up or log in to continue.',
+      });
+      return;
+    }
 
     let { currentId } = get();
 
@@ -294,13 +516,33 @@ export const useStore = create((set, get) => ({
             set((s) => ({ streamingContent: s.streamingContent + ev.content }));
           } else if (ev.type === 'done') {
             finish(ev.message);
+            get().refreshAuth();
           } else if (ev.type === 'error') {
             finish(ev.message);
+            get().refreshAuth();
           }
         },
       });
     } catch (err) {
       if (controller.signal.aborted) return; // server already saved partial state
+      // If the server rejected the send because the anonymous limit was reached,
+      // queue the message and show the auth modal.
+      if (err.code === 'ANONYMOUS_LIMIT_REACHED') {
+        set((s) => ({
+          messages: s.messages.filter((m) => m._id !== tempUser._id),
+          streaming: false,
+          streamingContent: '',
+          statusText: null,
+          abortController: null,
+          attachments: [...attachments],
+          pendingMessage: { content: text, attachments: [...attachments] },
+          authModalOpen: true,
+          authMode: 'login',
+          authError: err.message,
+          anonymousUsage: { ...(s.anonymousUsage || {}), blocked: true },
+        }));
+        return;
+      }
       finish({
         _id: `err-${Date.now()}`,
         role: 'assistant',

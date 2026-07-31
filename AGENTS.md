@@ -72,16 +72,14 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   so the preview must never be able to reach the API. `openArtifactInNewTab()` follows the
   same rule via a sandboxed iframe on a blank page — never a `blob:` URL, which would
   inherit this app's origin.
-- **No CORS, and one shared password.** The client is always same-origin (Express serves
+- **No CORS, and per-user authentication.** The client is always same-origin (Express serves
   it in prod, Vite proxies `/api` in dev), so `server/src/index.js` sends no
   `Access-Control-Allow-Origin` — adding bare `cors()` back would let any site the user
-  visits read every conversation, since the API has no per-request identity. Auth is
-  optional HTTP Basic gated on `APP_PASSWORD`, applied as the first middleware so it
-  covers the API, the SPA and static files (`/api/health` stays open for monitoring).
-  Keep the startup warning when it's unset — a deployment may legitimately rely on proxy
-  auth instead (the live box uses nginx `auth_basic`), but then `APP_PASSWORD` must be
-  either empty or the *same* credentials, because nginx forwards `Authorization` upstream
-  and a mismatch 401s everything.
+  visits read every conversation. Auth is now per-user via email/password + JWT cookie
+  (`auth-token`). Signup and forgot-password use a 6-digit OTP sent over SMTP. Users can
+  also chat anonymously up to `ANONYMOUS_MESSAGE_LIMIT` total messages per browser session
+  (`pm_session_id` in localStorage); after the limit, the UI prompts for login and the
+  server merges their anonymous chats into the new account.
 - **Point & edit** (surgical artifact editing) — the one invariant: *the model rewrites a
   fragment, the server splices it; nobody regenerates the document*.
   - `client/src/lib/htmlNodes.js` scans artifact source into elements with exact
@@ -131,10 +129,10 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   client learns availability via `GET /api/models`.
 - **Never overwrite `server/.env`** (no `cp .env.example .env` after first setup) — it
   contains the user's real API keys. To add new variables, append/surgically edit lines.
-  After any `.env` change, restart the server process. `client/vite.config.js` reads
-  (never writes) `server/.env` so the dev proxy can authenticate when `APP_PASSWORD` is
-  set — without that, every dev `/api` call would 401, because the browser authenticates
-  to Vite on :5173 while the proxy's own request to :5050 carries no credentials.
+  After any `.env` change, restart the server process. `server/.env` must contain
+  `JWT_SECRET`, `ANONYMOUS_MESSAGE_LIMIT`, SMTP settings, and `APP_NAME` for auth to work.
+  Auth events (register, login, otp sent, password reset, logout, anonymous limit hits)
+  are written to the `AuditLog` collection for metrics.
 
 ## Conventions
 
@@ -152,7 +150,6 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
 mongod --version                              # db running?
 node server/src/index.js &                    # start API
 curl localhost:5050/api/health
-# with APP_PASSWORD set, every call except /api/health needs -u "$APP_USER:$APP_PASSWORD"
 curl -s -X POST localhost:5050/api/conversations \
   -H 'Content-Type: application/json' -d '{"modelId":"demo-artist"}'
 curl -N -X POST localhost:5050/api/conversations/<id>/messages \
@@ -160,6 +157,11 @@ curl -N -X POST localhost:5050/api/conversations/<id>/messages \
 npm --prefix client test && npm --prefix server test          # unit tests pass
 cd client && npm run build                    # client compiles
 ```
+
+The conversation endpoints are now owner-scoped. To test anonymously from curl, pass a
+consistent `X-Session-Id` header and a cookie jar; to test as a logged-in user, sign up
+via `POST /api/auth/register` (triggers an OTP), verify with `POST /api/auth/verify-email`,
+then use the returned `auth-token` cookie for subsequent calls.
 
 Point & edit, end to end with no keys (`demo-artist` streams an artifact offline):
 
