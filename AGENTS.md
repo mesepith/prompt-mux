@@ -61,6 +61,24 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   Server nudges models to produce them via `config/systemPrompt.js`; client extracts
   them in `client/src/lib/artifacts.js` and previews in a sandboxed iframe
   (`sandbox="allow-scripts"` — do not loosen this).
+- **Artifact previews are untrusted code with no network.** Two rules, both load-bearing:
+  the iframe stays `sandbox="allow-scripts"` (never add `allow-same-origin`), and every
+  preview document carries `PREVIEW_CSP` (`default-src 'none'`, images/media/fonts limited
+  to `data:`/`blob:`, `form-action 'none'`) as a `<meta>` **first inside the head** —
+  `withCsp()` handles the placement, and `artifacts.test.js` asserts it for each document
+  shape. Inline script/style must stay allowed (that's the artifact plus the picker
+  runtime); do not add `connect-src`, a remote `img-src`, or anything else that re-opens
+  the network. Artifact HTML is model output steered by whatever was in the conversation,
+  so the preview must never be able to reach the API. `openArtifactInNewTab()` follows the
+  same rule via a sandboxed iframe on a blank page — never a `blob:` URL, which would
+  inherit this app's origin.
+- **No CORS, and one shared password.** The client is always same-origin (Express serves
+  it in prod, Vite proxies `/api` in dev), so `server/src/index.js` sends no
+  `Access-Control-Allow-Origin` — adding bare `cors()` back would let any site the user
+  visits read every conversation, since the API has no per-request identity. Auth is
+  optional HTTP Basic gated on `APP_PASSWORD`, applied as the first middleware so it
+  covers the API, the SPA and static files (`/api/health` stays open for monitoring).
+  Keep the startup warning when it's unset.
 - **Point & edit** (surgical artifact editing) — the one invariant: *the model rewrites a
   fragment, the server splices it; nobody regenerates the document*.
   - `client/src/lib/htmlNodes.js` scans artifact source into elements with exact
@@ -110,7 +128,10 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   client learns availability via `GET /api/models`.
 - **Never overwrite `server/.env`** (no `cp .env.example .env` after first setup) — it
   contains the user's real API keys. To add new variables, append/surgically edit lines.
-  After any `.env` change, restart the server process.
+  After any `.env` change, restart the server process. `client/vite.config.js` reads
+  (never writes) `server/.env` so the dev proxy can authenticate when `APP_PASSWORD` is
+  set — without that, every dev `/api` call would 401, because the browser authenticates
+  to Vite on :5173 while the proxy's own request to :5050 carries no credentials.
 
 ## Conventions
 
@@ -128,6 +149,7 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
 mongod --version                              # db running?
 node server/src/index.js &                    # start API
 curl localhost:5050/api/health
+# with APP_PASSWORD set, every call except /api/health needs -u "$APP_USER:$APP_PASSWORD"
 curl -s -X POST localhost:5050/api/conversations \
   -H 'Content-Type: application/json' -d '{"modelId":"demo-artist"}'
 curl -N -X POST localhost:5050/api/conversations/<id>/messages \

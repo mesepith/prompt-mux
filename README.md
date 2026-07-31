@@ -119,10 +119,15 @@ The Express server serves the built React app itself — one process, one port.
 ```bash
 # on the server (or use the automated script)
 sudo bash deploy/ubuntu-setup.sh      # installs Node 22, MongoDB 8, PM2, builds the app
-nano server/.env                      # add real API keys
+nano server/.env                      # add real API keys AND set APP_PASSWORD
 pm2 start deploy/ecosystem.config.cjs # run under PM2
 pm2 save && pm2 startup               # survive reboots
 ```
+
+> **Set `APP_PASSWORD` before the port is reachable.** There are no user accounts, so
+> without it the API serves every conversation — including text extracted from your
+> uploaded PDFs — to anyone who can reach the host. After editing `.env`, restart with
+> `pm2 restart prompt-mux --update-env` (a plain restart may not pick up new env vars).
 
 Put nginx in front (config in `deploy/nginx.conf`) for TLS and port 80/443.
 The nginx config already disables response buffering on `/api/` so SSE streaming works.
@@ -141,6 +146,8 @@ NODE_ENV=production node server/src/index.js   # serves app + API on :5050
 | -------- | ------- |
 | `PORT` | API/app port (default `5050`) |
 | `MONGODB_URI` | Mongo connection string (default `mongodb://127.0.0.1:27017/promptmux`) |
+| `APP_PASSWORD` | **Set this before exposing the app.** Password for the whole app (HTTP Basic). Empty = no auth. |
+| `APP_USER` | Username to go with it (default `promptmux`) |
 | `OPENAI_API_KEY` | OpenAI models |
 | `ANTHROPIC_API_KEY` | Claude models |
 | `GOOGLE_API_KEY` | Gemini models |
@@ -153,15 +160,30 @@ Providers without keys simply show as locked in the model picker.
 
 ## Notes & limitations
 
-- Artifact previews run in a sandboxed iframe (`sandbox="allow-scripts"`): the
-  model's JS can run but cannot touch your app's origin/storage.
+- Artifact previews run in a sandboxed iframe (`sandbox="allow-scripts"`) under a
+  no-network CSP: the model's JS can run, but it cannot touch your app's origin/storage
+  and **cannot make any network request** — no fetch/XHR/beacon, no remote images, fonts,
+  scripts or nested frames, no form posts. This matters because artifact code is written
+  by a model that just read your PDFs and web pages: without it, one poisoned document
+  could have the "artifact" quietly POST your whole chat history somewhere.
+  Consequence: artifacts can't load remote images or CDN assets (the system prompt
+  already forbids those — they'd show as broken images). "Open in new tab" is sandboxed
+  the same way.
+  One residual: a preview can still navigate *itself* to an external URL (no CSP
+  directive or sandbox flag covers self-navigation). That's visible — the preview pane
+  replaces itself — and since it can no longer read the API, it can only carry data the
+  model already put in that artifact.
 - Point & edit replaces one element at a time, so it's the wrong tool for "restructure the
   whole page" — for that, just ask in the chat as usual. There's no undo button yet;
   every version stays in the transcript, so click an older artifact card to get it back.
-- No user accounts yet — it's a single-user workspace; the data layer is ready for
-  an auth layer if you add one later. That also means a `/c/<id>` link is only as
-  private as the deployment: anyone who can reach the app can open a chat link (and
-  the sidebar). Put it behind auth/VPN before sharing links outside your circle.
+- No user accounts — it's a single-user workspace, gated by one shared password
+  (`APP_PASSWORD`). With it unset the server is wide open: fine on a laptop, never on a
+  reachable host, since the API hands over every chat plus the text extracted from every
+  PDF you uploaded. The server prints a warning at startup when it's unset.
+  A `/c/<id>` link is exactly as private as that password, so anyone you share a link
+  with needs it — and gets your whole sidebar too.
+- Terminate TLS in front of the app (see `deploy/nginx.conf` + certbot) — HTTP Basic
+  sends the password on every request, so over plain HTTP it's readable on the wire.
 - Moonshot's China endpoint: set `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1`.
 - Z.ai's China endpoint: set `ZAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4`.
 - DeepSeek V4 runs in "thinking mode" by default on their side — reasoning tokens are

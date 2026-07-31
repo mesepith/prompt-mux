@@ -52,8 +52,10 @@ pm2 startup systemd -u "$APP_USER" --hp "/home/$APP_USER" || true
 cat <<EOF
 
 Done. Next steps:
-  1. Edit $PROJECT_ROOT/server/.env and add your provider API keys
-  2. sudo -u $APP_USER pm2 restart prompt-mux
+  1. Edit $PROJECT_ROOT/server/.env — add your provider API keys AND set
+     APP_PASSWORD. Until it is set, anyone who can reach port 5050 can read
+     every conversation, including text extracted from your uploaded PDFs.
+  2. sudo -u $APP_USER pm2 restart prompt-mux --update-env
   3. (Optional) TLS/domain: edit deploy/nginx.conf, copy to
      /etc/nginx/sites-available/promptmux, symlink to sites-enabled,
      then: sudo nginx -t && sudo systemctl reload nginx
