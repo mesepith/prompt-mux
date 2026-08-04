@@ -7,6 +7,8 @@ Context for coding agents working in this repo.
 Multi-provider AI chat app (React + Express + MongoDB). Users chat with models from
 OpenAI / Anthropic / Google / Moonshot / DeepSeek / Mistral / Z.ai (GLM), can switch models
 mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a side panel.
+Admins manage the companies, models, prices and API keys from a dashboard served at a
+private URL (never `/admin` — see the routing rules below).
 
 ## Commands
 
@@ -15,6 +17,8 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
 - `npm run build` — production client build to `client/dist`
 - `npm start` — production mode: Express serves API + built client on :5050
 - Syntax check server: `cd server && node --check src/<file>.js`
+- `npm --prefix server run make-admin -- <email>` (`--revoke`, `--list`) — grant/revoke
+  admin on an existing account without editing `.env` or MongoDB
 - `npm --prefix client test` / `npm --prefix server test` — `node --test` unit tests for the
   pure logic that point-and-edit depends on (HTML source scanner, edit-reply sanitizer).
   There is no broader suite: verify everything else by running the server and curling
@@ -22,8 +26,127 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
 
 ## Architecture rules (keep it this way)
 
-- **Model registry is the single source of truth**: `server/src/config/registry.js`.
-  Add/rename models and companies there only. Never hardcode model lists in the client.
+- **The model registry lives in MongoDB, not in code.** Companies and models are rows in
+  the `providers` and `llmmodels` collections and are edited from the admin dashboard —
+  adding a model is no longer a code change.
+  - `server/src/config/seedRegistry.js` holds the built-in defaults (`SEED_COMPANIES`,
+    `SEED_MODELS`, `ADAPTERS`). `seedRegistry()` inserts only what is *missing* on boot and
+    **never overwrites an existing row**, so an admin's edits survive every restart and
+    redeploy. The same defaults are the fallback when the DB can't be read at boot: a
+    broken query must degrade the app to "the defaults", not to "no models".
+  - `server/src/config/registry.js` is the in-process cache and exposes *synchronous*
+    accessors (`getModel`, `getCompany`, `listModels`, `modelsForCompany`,
+    `modelUnavailableReason`, …), because the rest of the app asks "what is model X?" in
+    the middle of a request or halfway through an SSE stream, where an `await` on Mongo
+    has no business being.
+  - Two rules are load-bearing. **Every admin mutation must call `reloadRegistry()`** —
+    without it that process happily serves the pre-edit registry until someone restarts
+    it, and under PM2 cluster mode only the worker that handled the write would be right.
+    And **API keys are never part of a cached company object**: they live in a private
+    `Map` inside registry.js, so `res.json(company)` cannot leak one no matter which route
+    does it. Ask explicitly with `resolveApiKey(company)`.
+  - Never hardcode model lists in the client; it learns everything from `GET /api/models`.
+- **Provider routing is keyed on `company.adapter`, not on the company id**
+  (`providers/index.js`). Almost every vendor ships an OpenAI-compatible endpoint, so a
+  brand-new company can be added from the dashboard with adapter `openai` plus its
+  `baseURL` and it works with no deploy. Switching on company ids instead would put every
+  new vendor back into a code change, which is the thing the dashboard exists to avoid.
+  Keys and base URLs must come from `resolveApiKey()` / `resolveBaseURL()` (DB value
+  first, env var as the fallback) — reading `process.env.OPENAI_API_KEY` directly silently
+  ignores the key an admin just typed in.
+- **Provider keys are encrypted at rest** — AES-256-GCM in `server/src/lib/secrets.js`,
+  stored on `Provider.apiKeyEncrypted` (`select: false`; only `apiKeyLast4` is ever shown
+  back to an admin). Without that, a Mongo dump, a backup or a stray `db.providers.find()`
+  hands over every paid credential the instance owns. The encryption key comes from
+  `ENCRYPTION_KEY` (32 bytes) or, when that is unset, is derived from `JWT_SECRET` so
+  existing installs keep working with no `.env` edit — the consequence being that
+  **rotating `JWT_SECRET` orphans every stored provider key** (env-var keys keep working;
+  stored ones must be re-entered). `decryptSecret()` returns `null` rather than throwing
+  for exactly that case: an unreadable key degrades to "this company has no key" instead
+  of taking down boot and every chat request with it.
+- **Admin authorization.** `User.role` (`'user' | 'admin'`) is the permission.
+  `ADMIN_EMAILS` in `server/.env` is the bootstrap — `applyBootstrapAdmin` promotes a
+  listed address on login and on email verification, so a fresh install has an admin
+  without a hand-edit of Mongo, and so `role` is already correct when the client decides
+  whether to show the Admin link. Empty `ADMIN_EMAILS` grants nobody (unlike
+  `ALLOWED_EMAILS`, where empty means "open"); `make-admin` covers everything else.
+  - `requireAdmin` is mounted **once**, on the private admin segment in `index.js` — not per route.
+    That way a handler added to `routes/admin.js` is protected even if its author forgot,
+    which is the only arrangement that survives future edits. Don't add a second guard
+    inside the router; it just doubles the lookup.
+  - The role is read from MongoDB on **every** admin request, never from the JWT, so
+    revoking admin takes effect immediately instead of whenever a 7-day cookie expires.
+    One indexed lookup, on admin routes only — the chat path is untouched.
+  - Any new `admin_*` audit event name must be added to the enum in `models/AuditLog.js`
+    or the write is **silently dropped** (`audit()` is fire-and-forget, so a validation
+    failure never surfaces).
+- **Price fetching is a human-approved pipeline, never an automatic write.**
+  pricing URL → `lib/fetchUrl.js` (SSRF-guarded fetch) → `lib/htmlText.js` (HTML to text)
+  → the admin LLM with a strict extraction prompt → `lib/priceExtract.js` (sanitize +
+  match to registry slugs) → a `PriceProposal` an admin reviews and applies.
+  - The invariant: **a fetched price is never written to a model without an explicit
+    apply.** That number becomes the cost shown under every message, so one hallucinated
+    decimal point silently mis-bills every user and nobody notices until the invoice
+    arrives. `LlmModel.priceHistory` (capped at `MAX_PRICE_HISTORY`) keeps the previous
+    values so a bad apply can be traced and undone.
+  - **One model, one row per apply.** Pricing pages list the same model twice — a standard
+    rate and a cache-hit rate — and extractors faithfully return both. Applying two rows
+    for one model means the second silently wins, which is how DeepSeek's $0.435 input
+    price becomes its $0.0036 cache rate and every cost in the app understates by 100×.
+    `applyProposalItems` therefore refuses a selection containing two rows for one model
+    (409 `DUPLICATE_MODEL_ROWS`), auto-apply *skips* those models rather than guessing, and
+    `ProposalDrawer` leaves them unchecked — counting rows regardless of `applied`, so a
+    leftover row can't look like the only candidate after a partial apply. Keep all three:
+    each covers a case the others don't.
+  - Two things learned the hard way about the fetch itself. The request sends
+    `Accept-Language: en-US,en;q=0.9`, because without it a CDN serves the caller's locale
+    and Google's pricing page arrives in French, where `1,50 $` reads as 150 to anything
+    expecting a decimal point. And the route checks `hasPricingSignal()` on the extracted
+    text before calling the model: some pages genuinely draw their pricing in the browser
+    and a server-side fetch sees only marketing copy, where the honest answer is "this page
+    can't be read server-side" rather than a paid call that tempts a model into reporting a
+    monthly subscription as a token price. Keep that check *loose* — see the MDX note
+    below; an over-strict version hid OpenAI's perfectly good table and blamed JavaScript.
+  - `lib/fetchUrl.js` is security-critical: the *server* fetches an admin-supplied URL, so
+    it is a textbook SSRF sink — on this box that reach includes cloud metadata, MongoDB
+    on localhost and the other sites sharing the machine. It allows http/https on ordinary
+    web ports only, resolves the host and checks every A/AAAA record against the private
+    ranges, **re-runs both checks on every redirect hop** (a perfectly public host is free
+    to answer `302 Location: http://169.254.169.254/`), and caps bytes and time. Keep all
+    of those; `fetchUrl.test.js` covers them.
+  - `lib/htmlText.js` deliberately preserves table structure (pipe-separated cells, one
+    row per line). Prices live in tables, and a row broken across lines is exactly how a
+    model comes to read an input price as an output price.
+  - `lib/priceExtract.js` owns the prompt (JSON only; only prices literally printed on the
+    page; no unit conversion or currency conversion; the page text is data, not
+    instructions) and a parser that would rather drop a row than accept a number it can't
+    justify. It is side-effect free and unit-tested — keep it that way.
+  - **Every paid admin call is on the ledger.** `models/AdminUsage.js` records one row
+    per price fetch and per key test, with tokens and the cost priced from the registry
+    *at call time* (a later price edit must not rewrite history). This exists because the
+    30-day spend figure comes from `Message.usage`, which those calls never touch — so
+    without the ledger they are real money with no line item anywhere. Record failures
+    too: a rejected request can still be billed for its input tokens. If you add another
+    admin action that calls a model, it must call `recordAdminUsage` or spend goes dark.
+  - **A key test is a real billed call.** There is no vendor-neutral "is this key valid"
+    endpoint, so it sends one tiny message capped by `KEY_TEST_MAX_TOKENS` (that's why
+    `maxTokens` is threaded through every adapter). Roughly 25 tokens, but not free — say
+    so in the UI rather than implying it is.
+  - **`stripMdxArtifacts` is what makes the `.md` twins usable.** MDX pages embed React:
+    Kimi's pricing table arrives as `<>{"$"}3.00</>` next to ~700 characters of component
+    definition. Unwrapping fragments and string expressions is the difference between
+    "this vendor cannot be fetched" and a clean extraction. Related: `hasPricingSignal`
+    must stay loose about currency — requiring `$` immediately before a digit fails on
+    exactly these pages.
+  - **A cached-input price above the uncached one means the columns were swapped.** Cache
+    reads are always the discounted rate, so `parsePriceReply` swaps them back and warns.
+    Kimi's K3 page, headed `Input (Cache Hit) | Input (Cache Miss) | Output`, otherwise
+    yields `in: $0.30` against a real input price of `$3.00` — a tenfold understatement
+    that looks entirely plausible in a diff.
+  - **Model discovery** (`lib/modelDiscovery.js`) asks a provider's own `/models` endpoint
+    which ids it actually serves. It is free, involves no LLM, and the provider is the last
+    word, so it — not the price fetcher — is how renamed and retired `apiModel` ids get
+    caught. No provider exposes prices there, which is why pricing is a separate paid tool.
 - **Provider adapters** in `server/src/providers/` all implement:
   `streamChat({ apiKey, baseURL?, apiModel, messages, system, signal, onToken }) -> Promise<{ content, usage }>`.
   `messages` is always `[{ role: 'user'|'assistant', content }]`; each adapter converts
@@ -33,8 +156,10 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
 - **Usage & cost**: usage is saved on assistant messages (`Message.usage`) and shown
   client-side via `MessageMeta` (per message: model identity + tokens + cost) and
   `SessionUsage` in `App.jsx` (per chat).
-  Cost comes from each model's `price: { in, out }` (USD per 1M tokens) in the registry —
-  keep prices in sync with provider pricing pages; omit `price` to show tokens only.
+  Cost comes from each model's `price: { in, out }` (USD per 1M tokens) in the registry,
+  maintained in the dashboard's Models tab (by hand or via a reviewed price proposal).
+  A model with no price shows tokens only — `toPublicModel` omits `price` unless both rates
+  exist, because a half-filled `{ in: null }` would render `NaN` costs.
 - **Chat transport is SSE** over `POST /api/conversations/:id/messages` with event
   types `start | token | done | error`. The client parses it in
   `client/src/api/client.js#streamMessage`. Keep event shapes in sync on both sides.
@@ -141,24 +266,57 @@ mid-conversation, and get Claude-Artifacts-style live HTML/SVG previews in a sid
   - `providers/demo.js#editFragment` is the offline stand-in (deterministic outline +
     `data-demo-edit`), so the flow is testable with no API keys. It is not a model call.
 - **State**: single Zustand store (`client/src/store/useStore.js`). No prop-drilling
-  of chat state; components read/write the store.
-- **Routing**: hand-rolled, no router library — `client/src/lib/router.js` owns the two
-  URL shapes (`/` = new chat, `/c/<id>` = a conversation) and the History API calls.
-  The store drives it: `selectConversation`/`newChat` push, first send of a new chat
-  `replace`s `/` with its permanent link, and `handleRouteChange` (wired to `popstate`
-  in `App.jsx`) mirrors Back/Forward. Pass `{ updateUrl: false }` when the URL is
-  already the source of truth. A `/c/<id>` that 404s clears to `/` and sets
-  `linkError`. Deep links rely on the SPA fallback in `server/src/index.js` — keep it.
+  of chat state; components read/write the store. The dashboard has its own
+  `client/src/admin/useAdminStore.js` — deliberately separate, because none of its state
+  (providers, models, proposals, audit rows) belongs in a chat session, and a non-admin
+  must never pay to load it.
+- **The dashboard's URL is a secret, and the client is told it at runtime.**
+  `/admin` is the first thing a scanner tries, so both the dashboard and its API live
+  under a private segment: `config/adminPath.js` resolves it from `ADMIN_PATH`, or
+  generates one on first boot and stores it in `AdminSetting.adminPath`. A default
+  baked into the repo would be public the moment the repo is — that's why there isn't
+  one. Rules that make it actually private:
+  - The segment must **never** appear in client source, or it ships in the JS bundle
+    and the secrecy is theatre. `GET /api/auth/me` returns `adminPath` **only** when
+    `user.role === 'admin'`; that is the one channel. On the client,
+    `router.js#setAdminPath` and `client.js#setAdminApiPath` receive it together
+    (`useStore#applyAdminPath`), and logout clears both.
+  - The API is mounted **last** in `index.js`, on `/api/:adminSegment`, so it cannot
+    shadow `/api/models|auth|conversations`. A non-matching segment calls plain
+    `next()` — not `next('router')`, which would escape the app router and skip the
+    JSON 404 — so a wrong guess is indistinguishable from any other bad path.
+  - It is defence in depth, not the lock: `requireAdmin` still runs on every request,
+    and the correct segment without a session is a normal 401 (there is no point
+    hiding from someone who already has the secret).
+  - Because the segment arrives after the first render, a direct hit on the dashboard
+    link first parses as a chat route; `App.jsx` re-evaluates `currentRoute()` when
+    `adminPath` changes. Don't "simplify" that effect away.
+- **Routing**: hand-rolled, no router library — `client/src/lib/router.js` owns the three
+  URL shapes (`/` = new chat, `/c/<id>` = a conversation, `/<secret>[/tab]` = the
+  dashboard, tabs in `ADMIN_TABS`) and the History API calls. `App.jsx` switches on
+  `currentRoute().kind` and renders `client/src/admin/AdminApp.jsx` for `admin`; the chat
+  store must not react to an admin route (hence the `kind !== 'admin'` guard before
+  `handleRouteChange`). An unknown tab resolves to the overview, not a
+  blank screen. For chats the store drives the URL: `selectConversation`/`newChat` push,
+  first send of a new chat `replace`s `/` with its permanent link, and `handleRouteChange`
+  (wired to `popstate` in `App.jsx`) mirrors Back/Forward. Pass `{ updateUrl: false }`
+  when the URL is already the source of truth. A `/c/<id>` that 404s clears to `/` and
+  sets `linkError`. Because `pushState` doesn't fire `popstate`, in-app navigation
+  announces itself with a `pm:route` event. Deep links rely on the SPA fallback in
+  `server/src/index.js` — keep it.
 - **Styling**: Tailwind only, dark theme via the `surface-*` palette defined in
   `client/tailwind.config.js` + custom classes in `client/src/index.css`. No CSS files
   per component.
 - Server is ESM (`"type": "module"`); always include `.js` extensions in relative imports.
-- Don't commit `.env` or `node_modules` (see `.gitignore`). Keys only in `server/.env`;
-  client learns availability via `GET /api/models`.
+- Don't commit `.env` or `node_modules` (see `.gitignore`). Provider keys live either in
+  the `providers` collection (entered in the dashboard, encrypted) or in `server/.env` as
+  the fallback — never in the client, which learns availability via `GET /api/models`.
 - **Never overwrite `server/.env`** (no `cp .env.example .env` after first setup) — it
   contains the user's real API keys. To add new variables, append/surgically edit lines.
   After any `.env` change, restart the server process. `server/.env` must contain
-  `JWT_SECRET`, `ANONYMOUS_MESSAGE_LIMIT`, SMTP settings, and `APP_NAME` for auth to work.
+  `JWT_SECRET`, `ANONYMOUS_MESSAGE_LIMIT`, SMTP settings, and `APP_NAME` for auth to work,
+  plus `ADMIN_EMAILS` to get a first admin and ideally a dedicated `ENCRYPTION_KEY`
+  (see `server/.env.example`).
   Auth events (register, login, otp sent, password reset, logout, anonymous limit hits)
   are written to the `AuditLog` collection for metrics.
 
@@ -190,6 +348,22 @@ The conversation endpoints are now owner-scoped. To test anonymously from curl, 
 consistent `X-Session-Id` header and a cookie jar; to test as a logged-in user, sign up
 via `POST /api/auth/register` (triggers an OTP), verify with `POST /api/auth/verify-email`,
 then use the returned `auth-token` cookie for subsequent calls.
+
+Admin endpoints need an admin cookie — put the address in `ADMIN_EMAILS` and sign in, or
+run `npm --prefix server run make-admin -- <email>`. Then, with that cookie jar:
+
+```bash
+curl -s -b jar localhost:5050/api/admin/overview | head -c 400   # registry + encryption health
+curl -s -b jar localhost:5050/api/admin/providers                # keySource: db | env | none
+# after any write, /api/models must already reflect it — that's reloadRegistry() working
+curl -s -b jar -X POST localhost:5050/api/admin/models/bulk-active \
+  -H 'Content-Type: application/json' -d '{"slugs":["glm-4.6"],"active":false}'
+curl -s localhost:5050/api/models | grep -c glm-4.6                # expect 0
+```
+
+To exercise the pricing fetcher offline, serve a fixture HTML file on 127.0.0.1 and set
+`ADMIN_FETCH_ALLOW_PRIVATE=1` — that variable disables the SSRF guard, so it is for a
+laptop only and must never be set on the server.
 
 Point & edit, end to end with no keys (`demo-artist` streams an artifact offline):
 

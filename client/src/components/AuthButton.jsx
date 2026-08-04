@@ -1,8 +1,10 @@
-import { User, LogOut } from 'lucide-react';
+import { User, LogOut, ShieldCheck } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
+import { navigateToAdmin } from '../lib/router.js';
 
 export default function AuthButton() {
   const user = useStore((s) => s.user);
+  const adminPath = useStore((s) => s.adminPath);
   const openAuthModal = useStore((s) => s.openAuthModal);
   const logout = useStore((s) => s.logout);
 
@@ -15,6 +17,18 @@ export default function AuthButton() {
           </span>
           <span className="min-w-0 truncate text-xs text-zinc-300">{user.email}</span>
         </div>
+        {/* Admins only, and only once the private dashboard segment has arrived
+            from /api/auth/me — the link is the only place it surfaces in the UI. */}
+        {user.role === 'admin' && adminPath && (
+          <button
+            type="button"
+            onClick={() => navigateToAdmin('overview')}
+            title="Admin dashboard"
+            className="rounded-xl p-2 text-indigo-400/80 hover:bg-white/5 hover:text-indigo-300"
+          >
+            <ShieldCheck size={15} />
+          </button>
+        )}
         <button
           type="button"
           onClick={logout}

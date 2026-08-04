@@ -15,6 +15,8 @@ import {
 } from '../lib/rateLimit.js';
 import { consumeOtp, clearOtps } from '../lib/otp.js';
 import { isRegistrationAllowed } from '../config/access.js';
+import { applyBootstrapAdmin } from '../middleware/requireAdmin.js';
+import { adminPathSegment } from '../config/adminPath.js';
 import { mergeAnonymousSession } from '../lib/sessionMerge.js';
 import { Message } from '../models/Message.js';
 import { audit } from '../models/AuditLog.js';
@@ -33,7 +35,24 @@ function publicUser(user) {
     _id: user._id,
     email: user.email,
     verified: user.verified,
+    // The client shows the Admin link off this field. Authorization itself is
+    // re-checked server-side on every /api/admin request (middleware/requireAdmin.js),
+    // so a tampered client can only reveal a link, never a capability.
+    role: user.role || 'user',
     createdAt: user.createdAt,
+  };
+}
+
+/**
+ * The body returned by every endpoint that signs someone in. `adminPath` — the
+ * dashboard's private URL segment — is included ONLY for an admin, and this is
+ * the only channel through which the client ever learns it. Kept in one helper so
+ * login, verification and password reset can't drift apart on that rule.
+ */
+function authPayload(user) {
+  return {
+    user: publicUser(user),
+    ...(user.role === 'admin' ? { adminPath: adminPathSegment() } : {}),
   };
 }
 
@@ -113,12 +132,16 @@ async function anonymousUsage(sessionId) {
 router.get('/me', async (req, res, next) => {
   try {
     if (req.userId) {
-      const user = await User.findById(req.userId).lean();
+      const user = await User.findById(req.userId);
       if (!user) {
         clearAuthCookie(res);
         return res.json({ user: null, anonymous: await anonymousUsage(req.sessionId) });
       }
-      return res.json({ user: publicUser(user), anonymous: null });
+      // Promote here too: an admin listed in ADMIN_EMAILS who already has a
+      // valid cookie never hits the login path again, and would otherwise never
+      // see the dashboard link.
+      await applyBootstrapAdmin(user, req);
+      return res.json({ ...authPayload(user), anonymous: null });
     }
     return res.json({ user: null, anonymous: await anonymousUsage(req.sessionId) });
   } catch (err) {
@@ -230,8 +253,9 @@ router.post('/verify-email', async (req, res, next) => {
     const token = await signToken({ userId: user._id, email: user.email });
     setAuthCookie(res, token);
     audit({ event: 'email_verified', userId: user._id, email: user.email, sessionId, req });
+    await applyBootstrapAdmin(user, req);
 
-    res.json({ user: publicUser(user) });
+    res.json(authPayload(user));
   } catch (err) {
     next(err);
   }
@@ -310,8 +334,9 @@ router.post('/login', async (req, res, next) => {
     setAuthCookie(res, token);
     clearLimit(`login:${normalized}`); // a success shouldn't leave the account throttled
     audit({ event: 'user_login', userId: user._id, email: user.email, sessionId, req });
+    await applyBootstrapAdmin(user, req);
 
-    res.json({ user: publicUser(user) });
+    res.json(authPayload(user));
   } catch (err) {
     next(err);
   }
@@ -419,8 +444,9 @@ router.post('/reset-password', async (req, res, next) => {
     const token = await signToken({ userId: user._id, email: user.email });
     setAuthCookie(res, token);
     audit({ event: 'password_reset', userId: user._id, email: user.email, sessionId, req });
+    await applyBootstrapAdmin(user, req);
 
-    res.json({ user: publicUser(user) });
+    res.json(authPayload(user));
   } catch (err) {
     next(err);
   }

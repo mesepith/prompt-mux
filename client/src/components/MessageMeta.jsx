@@ -187,7 +187,7 @@ export default function MessageMeta({ message, isStreaming = false }) {
 
         {usage && !model?.price && !visionUsage && (
           <p className="mt-1.5 text-[10px] leading-4 text-zinc-600">
-            No price data for this model — add it to the registry to see cost estimates.
+            No price data for this model — an admin can set it in the dashboard to see cost estimates.
           </p>
         )}
         {(usage || visionUsage) && (

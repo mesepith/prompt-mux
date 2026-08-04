@@ -1,7 +1,18 @@
 import { create } from 'zustand';
-import { api, streamMessage, setApiSessionId } from '../api/client.js';
+import { api, streamMessage, setApiSessionId, setAdminApiPath } from '../api/client.js';
 import { extractArtifacts } from '../lib/artifacts.js';
-import { currentRouteId, navigateTo } from '../lib/router.js';
+import { currentRouteId, navigateTo, setAdminPath } from '../lib/router.js';
+
+/**
+ * The dashboard's private URL segment arrives only in /api/auth/me, and only for
+ * an admin. Push it into the router and the API client together so a single call
+ * site owns the "we now know where the dashboard is" transition.
+ */
+function applyAdminPath(adminPath) {
+  setAdminPath(adminPath || null);
+  setAdminApiPath(adminPath || null);
+  return adminPath || null;
+}
 
 const SESSION_KEY = 'pm_session_id';
 
@@ -47,6 +58,7 @@ export const useStore = create((set, get) => ({
   // auth
   sessionId: null,
   user: null,
+  adminPath: null, // private dashboard segment; only ever set for an admin
   anonymousUsage: null, // { messageCount, limit, blocked }
   authModalOpen: false,
   authMode: 'login', // 'login' | 'signup' | 'forgot'
@@ -92,6 +104,7 @@ export const useStore = create((set, get) => ({
         companies,
         models,
         user: auth.user,
+        adminPath: applyAdminPath(auth.adminPath),
         anonymousUsage: auth.anonymous,
         conversations,
         selectedModelId: firstAvailable?.id || 'demo-artist',
@@ -135,7 +148,11 @@ export const useStore = create((set, get) => ({
   refreshAuth: async () => {
     try {
       const auth = await api.authMe();
-      set({ user: auth.user, anonymousUsage: auth.anonymous });
+      set({
+        user: auth.user,
+        adminPath: applyAdminPath(auth.adminPath),
+        anonymousUsage: auth.anonymous,
+      });
     } catch (err) {
       // ignore — the next request will fail cleanly
     }
@@ -158,6 +175,7 @@ export const useStore = create((set, get) => ({
       const conversations = await api.listConversations();
       set({
         user,
+        adminPath: applyAdminPath(result.adminPath),
         anonymousUsage: null,
         conversations,
         authLoading: false,
@@ -197,10 +215,12 @@ export const useStore = create((set, get) => ({
     }
     set({ authLoading: true, authError: null });
     try {
-      const { user } = await api.verifyEmail(email, otp);
+      const result = await api.verifyEmail(email, otp);
+      const { user } = result;
       const conversations = await api.listConversations();
       set({
         user,
+        adminPath: applyAdminPath(result.adminPath),
         anonymousUsage: null,
         conversations,
         authLoading: false,
@@ -254,10 +274,12 @@ export const useStore = create((set, get) => ({
     }
     set({ authLoading: true, authError: null });
     try {
-      const { user } = await api.resetPassword(email, otp, password);
+      const result = await api.resetPassword(email, otp, password);
+      const { user } = result;
       const conversations = await api.listConversations();
       set({
         user,
+        adminPath: applyAdminPath(result.adminPath),
         anonymousUsage: null,
         conversations,
         authLoading: false,
@@ -296,8 +318,12 @@ export const useStore = create((set, get) => ({
     const sessionId = crypto.randomUUID();
     window.localStorage.setItem(SESSION_KEY, sessionId);
     setApiSessionId(sessionId);
+    // Forget the private dashboard path on the way out, so it can't be reached
+    // (or read out of the store) by whoever uses this browser next.
+    applyAdminPath(null);
     set({
       user: null,
+      adminPath: null,
       sessionId,
       conversations: [],
       messages: [],

@@ -1,4 +1,9 @@
-import { getCompany, isCompanyAvailable } from '../config/registry.js';
+import {
+  getCompany,
+  isCompanyAvailable,
+  resolveApiKey,
+  resolveBaseURL,
+} from '../config/registry.js';
 import * as openai from './openai.js';
 import * as anthropic from './anthropic.js';
 import * as google from './google.js';
@@ -8,58 +13,55 @@ import * as demo from './demo.js';
  * Routes a chat request to the right provider adapter. Every adapter shares
  * the same streamChat signature, so the rest of the app never cares which
  * company a model belongs to.
+ *
+ * Routing is keyed on the company's `adapter` (not its id), because companies
+ * are rows in MongoDB now: an admin can add a brand-new vendor from the
+ * dashboard with adapter 'openai' + its baseURL and it works with no code
+ * change. Almost every vendor ships an OpenAI-compatible endpoint.
+ *
+ * The API key and base URL come from the registry (DB value first, env var as
+ * the fallback) — never from process.env directly, or a key entered in the
+ * dashboard would be silently ignored.
  */
-export async function streamChat({ model, messages, system, signal, onToken }) {
+export async function streamChat({ model, messages, system, signal, onToken, maxTokens }) {
   const company = getCompany(model.company);
   if (!company) throw new Error(`Unknown company: ${model.company}`);
 
+  // An admin can switch a company or a model off while conversations still
+  // reference it. Say so plainly instead of failing at the provider.
+  if (!company.active) {
+    throw new Error(`${company.name} has been deactivated by the administrator.`);
+  }
+  if (model.active === false) {
+    throw new Error(`${model.name} has been deactivated by the administrator.`);
+  }
+
   if (!isCompanyAvailable(company)) {
     throw new Error(
-      `${company.name} is not configured. Add ${company.envKey} to server/.env and restart the server.`
+      `${company.name} has no API key. Add one in the admin dashboard${
+        company.envKey ? `, or set ${company.envKey} in server/.env and restart the server` : ''
+      }.`
     );
   }
 
-  const common = { apiModel: model.apiModel, messages, system, signal, onToken };
+  const apiKey = resolveApiKey(company);
+  const baseURL = resolveBaseURL(company);
+  const common = { apiModel: model.apiModel, messages, system, signal, onToken, ...(maxTokens ? { maxTokens } : {}) };
 
-  switch (model.company) {
+  switch (company.adapter) {
     case 'openai':
-      return openai.streamChat({ ...common, apiKey: process.env.OPENAI_API_KEY });
+      return openai.streamChat({ ...common, apiKey, ...(baseURL ? { baseURL } : {}) });
     case 'anthropic':
-      return anthropic.streamChat({ ...common, apiKey: process.env.ANTHROPIC_API_KEY });
+      return anthropic.streamChat({ ...common, apiKey, ...(baseURL ? { baseURL } : {}) });
     case 'google':
-      return google.streamChat({ ...common, apiKey: process.env.GOOGLE_API_KEY });
-    case 'moonshot':
-      // Moonshot exposes an OpenAI-compatible API.
-      return openai.streamChat({
-        ...common,
-        apiKey: process.env.MOONSHOT_API_KEY,
-        baseURL: process.env.MOONSHOT_BASE_URL || 'https://api.moonshot.ai/v1',
-      });
-    case 'deepseek':
-      // DeepSeek exposes an OpenAI-compatible API (thinking mode is server-side default).
-      return openai.streamChat({
-        ...common,
-        apiKey: process.env.DEEPSEEK_API_KEY,
-        baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-      });
-    case 'mistral':
-      // Mistral exposes an OpenAI-compatible API. Use versions copied from their model cards (url).
-      return openai.streamChat({
-        ...common,
-        apiKey: process.env.MISTRAL_API_KEY,
-        baseURL: process.env.MISTRAL_BASE_URL || 'https://api.mistral.ai/v1',
-      });
-    case 'zai':
-      // Z.ai (GLM) exposes an OpenAI-compatible API.
-      return openai.streamChat({
-        ...common,
-        apiKey: process.env.ZAI_API_KEY,
-        baseURL: process.env.ZAI_BASE_URL || 'https://api.z.ai/api/paas/v4',
-      });
+      // The Google SDK takes no base URL override.
+      return google.streamChat({ ...common, apiKey });
     case 'demo':
       return demo.streamChat(common);
     default:
-      throw new Error(`No provider adapter for company: ${model.company}`);
+      throw new Error(
+        `No provider adapter for "${company.adapter}" (company: ${company.id}). Use openai, anthropic, google or demo.`
+      );
   }
 }
 

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Globe, Link2, PanelLeft, Pencil, X, Zap } from 'lucide-react';
+import { Check, Globe, Link2, PanelLeft, Pencil, X, Zap } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from './store/useStore.js';
 import { formatCost, formatTokens, messageCost } from './lib/usage.js';
-import { onRouteChange } from './lib/router.js';
+import { currentRoute, onRouteChange } from './lib/router.js';
+import AdminApp from './admin/AdminApp.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import MessageList from './components/MessageList.jsx';
 import Composer from './components/Composer.jsx';
@@ -166,13 +167,34 @@ export default function App() {
   const handleRouteChange = useStore((s) => s.handleRouteChange);
   const currentConversationIsOwner = useStore((s) => s.currentConversationIsOwner);
   const currentConversationShared = useStore((s) => s.currentConversationShared);
+  const adminPath = useStore((s) => s.adminPath);
+  const [route, setRoute] = useState(() => currentRoute());
 
   useEffect(() => {
     bootstrap();
   }, [bootstrap]);
 
-  // Browser Back/Forward between chats.
-  useEffect(() => onRouteChange(handleRouteChange), [handleRouteChange]);
+  // The dashboard's URL segment is only known once auth resolves, so a direct hit
+  // on that link first parses as a chat route. Re-evaluate when it arrives (and
+  // when it's cleared on logout, which sends an admin back to the chat).
+  useEffect(() => {
+    setRoute(currentRoute());
+  }, [adminPath]);
+
+  // Back/Forward, plus in-app moves between the chat and /admin.
+  useEffect(
+    () =>
+      onRouteChange((next) => {
+        setRoute(next);
+        // The chat store owns conversation state; it must not react to /admin.
+        if (next.kind !== 'admin') handleRouteChange(next.id);
+      }),
+    [handleRouteChange]
+  );
+
+  // The dashboard is its own screen — no chat sidebar, composer or artifact panel.
+  // It still waits on `bootstrap()` for the user, so it can gate on the role.
+  if (route.kind === 'admin') return <AdminApp tab={route.tab} />;
 
   if (!booted) return <Splash />;
 

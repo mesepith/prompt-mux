@@ -10,7 +10,12 @@ live previews.
 ## Features
 
 - **Multi-provider, multi-model** — GPT, Claude, Gemini, Kimi, DeepSeek, Mistral and GLM models
-  in one place, driven by a single editable registry (`server/src/config/registry.js`).
+  in one place, driven by a single model registry you edit in the browser (no code changes,
+  no redeploy — see **Admin dashboard** below).
+- **Admin dashboard** — a `/admin` area for the owner: add companies and models, set each
+  model's input/output price, switch models on and off, paste API keys (encrypted in the
+  database), pull the latest prices off a provider's pricing page for review, and see the
+  last 30 days of spend per model.
 - **Switch models mid-conversation** — pick a different model for any message; every
   reply is badged with the model that wrote it. Full history is preserved per chat.
 - **Live artifacts** — ask for a website, game, dashboard or component and the model's
@@ -38,7 +43,8 @@ live previews.
 - **Token streaming** — real-time SSE streaming for every provider, with stop support.
 - **Token & cost tracking** — every reply shows provider-reported input/output/total
   tokens (hover for the full rate breakdown), plus a per-chat running total with
-  estimated cost in USD. Prices live in the model registry.
+  estimated cost in USD. Prices come from the model registry and are editable in the
+  admin dashboard.
 - **Persistent history** — conversations and messages stored in MongoDB, auto-titled,
   renameable, deletable.
 - **A link per chat** — every chat gets its own URL (`/c/<id>`) the moment it starts, so
@@ -65,18 +71,21 @@ live previews.
 prompt-mux/
 ├── package.json            # root scripts (dev / build / start)
 ├── server/                 # Express API + LLM gateway
-│   ├── .env.example        # provider API keys + Mongo URI
+│   ├── .env.example        # config: Mongo, auth, SMTP, admin, provider API keys
+│   ├── scripts/            # make-admin (grant/revoke admin from the CLI)
 │   └── src/
 │       ├── index.js        # app entry (serves client/dist in production)
-│       ├── config/         # db, model registry, system prompt
-│       ├── models/         # Conversation, Message (Mongoose)
+│       ├── config/         # db, registry cache + seed defaults, system prompt, access rules
+│       ├── models/         # Conversation, Message, User, Provider, LlmModel, ... (Mongoose)
+│       ├── lib/            # secrets, PDF/image handling, SSRF-guarded fetch, price extraction
 │       ├── providers/      # openai / anthropic / google / demo adapters
-│       └── routes/         # /api/models, /api/conversations (+ SSE chat)
+│       └── routes/         # /api/models, /api/conversations (+ SSE chat), /api/auth, /api/admin
 ├── client/                 # React SPA
 │   └── src/
 │       ├── api/            # fetch helpers + SSE stream reader
 │       ├── store/          # Zustand store (chat state machine)
 │       ├── lib/            # artifact extraction / preview helpers
+│       ├── admin/          # the /admin dashboard (own store + panels)
 │       └── components/     # Sidebar, MessageList, Composer, ModelPicker, ArtifactPanel, ...
 └── deploy/                 # Ubuntu production: setup script, PM2, nginx
 ```
@@ -99,18 +108,116 @@ Open **http://localhost:5173**.
 > No keys yet? The **Demo Artist** model works offline and streams a sample
 > interactive artifact so you can see everything working.
 
-## Adding / renaming models
+## Admin dashboard
 
-Edit `server/src/config/registry.js` and restart the server. Example — adding
-"ChatGPT 5.5" when it ships:
+The dashboard is **not** at `/admin` — that path gets scanned within minutes of a host
+going public. It lives at a private URL instead, and there's an *Admin* link in the sidebar
+once your account has the role. To find the address: it's printed in the server log at
+startup, shown on the dashboard's **Settings** tab (copyable, and changeable), and returned
+by `GET /api/auth/me` to admins only. Pin your own with `ADMIN_PATH` in `server/.env`:
 
-```js
-{ id: 'chatgpt-5.5', company: 'openai', name: 'ChatGPT 5.5', apiModel: 'gpt-5.5', tagline: 'Next-gen flagship' },
+```bash
+ADMIN_PATH=my-secret-console        # -> https://your-host/my-secret-console
 ```
 
-- `name` is what users see; `apiModel` is the exact id the provider API expects.
-- To add a whole new company, add it to `COMPANIES` (with its env var name) and add a
-  small adapter in `server/src/providers/` (see `openai.js` for the interface).
+Leave it empty and the server generates one on first boot. Either way this is a second
+line of defence, not the lock: every request still verifies you're a signed-in
+administrator, and a wrong address returns a plain 404.
+
+The registry lives in MongoDB, so everything here takes effect immediately — no editing
+source files, no restart:
+
+- **Companies** — add, rename or deactivate a provider. Most vendors ship an
+  OpenAI-compatible API, so a brand-new company is usually just *adapter: openai* plus its
+  base URL. **Paste the API key straight into the dashboard** — press *Key* on the company's
+  row — and it is encrypted before it is stored. That is the normal path and it always wins
+  over the environment. The `*_API_KEY` variables in `server/.env` are only a fallback, kept
+  so installs that predate this dashboard keep working; a new company needs nothing there.
+  "Test key" makes one real call to confirm it works, and "Discover models" asks the
+  provider's own API which model ids it actually serves — the quickest way to spot a model
+  that was renamed or retired.
+- **Models** — add or edit a model (display name, the exact `apiModel` id the API expects,
+  tagline, context window, vision support) and set its **input / output price in USD per 1M
+  tokens**, which is what every cost figure in the app is computed from. Activate or
+  deactivate models to control what appears in the model picker; existing chats that used a
+  deactivated model still open and say so.
+- **Pricing** — fetch prices from a provider's pricing page and review them (below).
+- **Settings** — which model to use for reading pricing pages, how much of a page to read,
+  and whether fetched prices need approval.
+- **Overview / Activity** — a health panel (missing keys, unpriced models, whether key
+  encryption is configured), the last **30 days of usage and estimated spend per model**,
+  and the admin audit trail.
+
+### Becoming the first admin
+
+Add your address to `ADMIN_EMAILS` in `server/.env`, restart, then sign in — the account is
+promoted on login. Unlike `ALLOWED_EMAILS`, leaving it empty grants nobody:
+
+```bash
+ADMIN_EMAILS=me@example.com          # exact addresses, comma-separated
+```
+
+Or do it straight from the command line, for an account that already exists:
+
+```bash
+npm --prefix server run make-admin -- me@example.com            # grant
+npm --prefix server run make-admin -- me@example.com --revoke   # revoke
+npm --prefix server run make-admin -- --list                    # who has access
+```
+
+Also set `ENCRYPTION_KEY` (`openssl rand -hex 32`) if you plan to store API keys in the
+dashboard — see the environment-variable table below.
+
+### How price fetching works
+
+Model prices change, and a stale price means every cost figure in the app is wrong. So the
+dashboard can read them for you:
+
+1. You pick a company (or a single model) and confirm its pricing-page URL.
+2. The server fetches that page — only public http/https addresses, with a size and time
+   limit, so the feature can't be pointed at something inside your network.
+3. The HTML is reduced to plain text with pricing tables kept intact, and handed to the
+   **admin model** you chose in Settings, with a prompt that only allows it to report
+   numbers literally printed on the page.
+4. The result is a **proposal**, not a change: every row shows the model it matched, the
+   old and new price, and the exact text on the page it came from. You tick the rows you
+   believe and apply them; the rest are discarded. Previous prices are kept in each
+   model's history.
+
+Nothing is ever written to a model's price without that explicit approval — a made-up
+number would quietly mis-bill every user of the app. Model *discovery* is the free
+counterpart and involves no AI at all: it just asks the provider which model ids exist.
+
+**Which pricing pages this can read** (checked 2026-08-04). A server-side fetch only sees
+the HTML the server sends, so a pricing table drawn by JavaScript in the browser is
+invisible to it:
+
+| Provider | Auto-fetch | Page used |
+| --- | --- | --- |
+| OpenAI | yes | `developers.openai.com/api/docs/pricing.md` |
+| Anthropic | yes | `platform.claude.com/docs/en/about-claude/pricing.md` |
+| Google | yes | `ai.google.dev/gemini-api/docs/pricing` |
+| DeepSeek | yes | `api-docs.deepseek.com/quick_start/pricing` |
+| Z.ai (GLM) | yes | `docs.z.ai/guides/overview/pricing` |
+| Mistral | yes | `mistral.ai/pricing/api/` |
+| Moonshot (Kimi) | yes, per model | `platform.kimi.ai/docs/pricing/chat-k3.md` and siblings |
+
+Three things worth knowing if you point this at a different page. Several vendors publish a
+markdown twin of every docs page (just append `.md`), which is cleaner and cheaper to read
+than the rendered HTML — the seeded OpenAI, Anthropic and Kimi URLs use it. The marketing
+pricing page is usually the wrong target: `openai.com/api/pricing` returns 403 to anything
+that isn't a browser, while the docs page serves the same table happily. And Kimi prices
+per model rather than on one page, so those URLs live on the models themselves — use the
+**Prices** button on a model's row instead of the company's *Fetch prices*.
+
+### What the dashboard itself costs
+
+Reading a pricing page and testing a key are both real, billed model calls, so both are
+logged. **Overview → Admin operations** shows the last 30 days: cost, call count, tokens in
+and out, and the share of your total spend, broken down by operation and by the model that
+was billed — failures included, since a rejected request can still be charged for its input
+tokens. A key test is capped to a handful of tokens (a few hundred-thousandths of a cent);
+a price fetch is larger because it sends a page of text, typically 1,500–6,000 tokens.
 
 ## Production (Ubuntu)
 
@@ -157,6 +264,11 @@ NODE_ENV=production node server/src/index.js   # serves app + API on :5050
 | `ANONYMOUS_MESSAGE_LIMIT` | Messages a not-logged-in visitor may send (default `3`) |
 | `OTP_EXPIRY_MINUTES` | OTP lifetime (default `10`) |
 | `BCRYPT_ROUNDS` | Password hashing cost |
+| `ADMIN_EMAILS` | Exact addresses (comma-separated) promoted to admin on sign-in. Empty = nobody |
+| `ADMIN_PATH` | Private URL segment the dashboard is served from (never `/admin`). Empty = generated on first boot and stored in MongoDB |
+| `ENCRYPTION_KEY` | 32 bytes (`openssl rand -hex 32`) — encrypts API keys saved in the dashboard. Falls back to a key derived from `JWT_SECRET`, so rotating that secret makes stored keys unreadable |
+| `ADMIN_LLM_MODEL` | Fallback model id used to read pricing pages when Settings doesn't name one |
+| `ADMIN_FETCH_ALLOW_PRIVATE` | Local development only: `1` lets the price fetcher reach private/loopback addresses. Leave unset in production |
 | `OPENAI_API_KEY` | OpenAI models |
 | `ANTHROPIC_API_KEY` | Claude models |
 | `GOOGLE_API_KEY` | Gemini models |
@@ -165,7 +277,9 @@ NODE_ENV=production node server/src/index.js   # serves app + API on :5050
 | `MISTRAL_API_KEY` / `MISTRAL_BASE_URL` | Mistral Medium 3.5 / Small 4 / Large 3 / Codestral (OpenAI-compatible) |
 | `ZAI_API_KEY` / `ZAI_BASE_URL` | GLM-5.2 / 5-Turbo / 4.x (OpenAI-compatible) |
 
-Providers without keys simply show as locked in the model picker.
+The provider key variables are **fallbacks**: a key entered in the admin dashboard is
+stored (encrypted) in MongoDB and wins over the matching variable. Providers with neither
+simply show as locked in the model picker.
 
 ## Notes & limitations
 

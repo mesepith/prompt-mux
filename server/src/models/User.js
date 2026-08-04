@@ -12,6 +12,10 @@ const userSchema = new mongoose.Schema(
     },
     passwordHash: { type: String, required: true },
     verified: { type: Boolean, default: false },
+    // Admins reach /admin — the LLM company/model/pricing/key dashboard.
+    // Bootstrap the first one with ADMIN_EMAILS in server/.env (see
+    // config/access.js#isBootstrapAdmin) or `npm --prefix server run make-admin`.
+    role: { type: String, enum: ['user', 'admin'], default: 'user', index: true },
   },
   { timestamps: true }
 );

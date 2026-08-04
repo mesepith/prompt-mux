@@ -2,7 +2,12 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import { Conversation } from '../models/Conversation.js';
 import { Message } from '../models/Message.js';
-import { getModel, getCompany, isCompanyAvailable } from '../config/registry.js';
+import {
+  getModel,
+  getCompany,
+  isCompanyAvailable,
+  modelUnavailableReason,
+} from '../config/registry.js';
 import { SYSTEM_PROMPT } from '../config/systemPrompt.js';
 import { EDIT_SYSTEM_PROMPT, buildEditPrompt, cleanFragment, rootTag } from '../config/editPrompt.js';
 import { streamChat, describeImages } from '../providers/index.js';
@@ -53,10 +58,14 @@ router.get('/', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const { modelId, visionModelId } = req.body || {};
-    if (!getModel(modelId)) return res.status(400).json({ error: 'Unknown modelId' });
+    // Deactivated models are rejected up front: the picker never offers them, so
+    // reaching here means a stale client or a hand-made request.
+    const unavailable = modelUnavailableReason(getModel(modelId));
+    if (unavailable) return res.status(400).json({ error: unavailable });
     if (visionModelId) {
       const vm = getModel(visionModelId);
-      if (!vm) return res.status(400).json({ error: 'Unknown visionModelId' });
+      const vmUnavailable = modelUnavailableReason(vm);
+      if (vmUnavailable) return res.status(400).json({ error: vmUnavailable });
       if (!vm.vision)
         return res.status(400).json({ error: `${vm.name} does not support image input` });
     }
@@ -114,10 +123,14 @@ router.patch('/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Conversation not found' });
 
     const { title, modelId, visionModelId, shared } = req.body || {};
-    if (modelId && !getModel(modelId)) return res.status(400).json({ error: 'Unknown modelId' });
+    if (modelId) {
+      const unavailable = modelUnavailableReason(getModel(modelId));
+      if (unavailable) return res.status(400).json({ error: unavailable });
+    }
     if (visionModelId) {
       const vm = getModel(visionModelId);
-      if (!vm) return res.status(400).json({ error: 'Unknown visionModelId' });
+      const vmUnavailable = modelUnavailableReason(vm);
+      if (vmUnavailable) return res.status(400).json({ error: vmUnavailable });
       if (!vm.vision)
         return res.status(400).json({ error: `${vm.name} does not support image input` });
     }

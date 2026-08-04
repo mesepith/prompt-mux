@@ -1,131 +1,349 @@
 /**
- * Model registry — the single source of truth for companies and models.
+ * Model registry — the runtime source of truth for companies and models.
  *
- * To add a new model (e.g. "ChatGPT 5.5", "Claude Opus 4.8", "Gemini Flash 3.1"),
- * just add an entry to MODELS below:
- *   - id:        unique slug used across the app
- *   - company:   must match a company id in COMPANIES
- *   - name:      display name shown in the UI
- *   - apiModel:  the exact model id the provider's API expects
- *   - tagline:   short description shown in the model picker
- *   - price:     USD per 1M tokens { in, out } — used for the cost estimate in the UI.
- *                Keep in sync with each provider's pricing page. Omit for no cost display.
- *   - vision:    true if the model accepts image input. When the selected chat model
- *                has vision: false, attached images are handled by a separate
- *                vision-capable model (conversation.visionModelId).
- *   - pdf:       true if the model accepts native PDF input (in-chat, not Files API).
- *                When pdf: false, PDFs are rendered to images server-side and the
- *                vision model reads them. Currently false for all — rendered pages
- *                are fed through the same vision-model flow as images.
+ * Companies and models live in MongoDB (`providers` / `llmmodels`) and are edited
+ * from the admin dashboard. This module holds them in an in-process cache so the
+ * rest of the app can keep asking synchronous questions ("what is model X?",
+ * "does this company have a key?") in the middle of a request or an SSE stream.
+ *
+ * Shape contract: `getCompany()` / `getModel()` / `listCompanies()` /
+ * `listModels()` return exactly the plain objects the client has always seen
+ * (`company.id`, `model.company`, `model.price = { in, out }`), so nothing
+ * downstream cares that the data now comes from a database.
+ *
+ * Two rules worth keeping:
+ *  1. **API keys are never part of a cached company object.** They live in a
+ *     separate private map, so `res.json(company)` can never leak one. Ask for a
+ *     key explicitly via `resolveApiKey()`.
+ *  2. **Every admin mutation must call `reloadRegistry()`**, otherwise the
+ *     process keeps serving the old registry until it restarts.
+ *
+ * config/seedRegistry.js holds the built-in defaults used to seed an empty
+ * database, and is also the fallback if the DB can't be read at boot — a broken
+ * Mongo query should degrade the app to "the defaults", not to "no models".
  */
-export const COMPANIES = [
-  {
-    id: 'openai',
-    name: 'OpenAI',
-    envKey: 'OPENAI_API_KEY',
-    color: '#10a37f',
-  },
-  {
-    id: 'anthropic',
-    name: 'Anthropic',
-    envKey: 'ANTHROPIC_API_KEY',
-    color: '#d97757',
-  },
-  {
-    id: 'google',
-    name: 'Google',
-    envKey: 'GOOGLE_API_KEY',
-    color: '#4285f4',
-  },
-  {
-    id: 'moonshot',
-    name: 'Moonshot AI',
-    envKey: 'MOONSHOT_API_KEY',
-    color: '#8b5cf6',
-  },
-  {
-    id: 'deepseek',
-    name: 'DeepSeek',
-    envKey: 'DEEPSEEK_API_KEY',
-    color: '#4d6bfe',
-  },
-  {
-    id: 'mistral',
-    name: 'Mistral',
-    envKey: 'MISTRAL_API_KEY',
-    color: '#f97316',
-  },
-  {
-    id: 'zai',
-    name: 'Z.ai (GLM)',
-    envKey: 'ZAI_API_KEY',
-    color: '#22d3ee',
-  },
-  {
-    id: 'demo',
-    name: 'Demo (no key needed)',
-    envKey: null,
-    color: '#a1a1aa',
-  },
-];
+import { Provider } from '../models/Provider.js';
+import { LlmModel } from '../models/LlmModel.js';
+import { SEED_COMPANIES, SEED_MODELS } from './seedRegistry.js';
+import { decryptSecret } from '../lib/secrets.js';
 
-export const MODELS = [
-  // --- OpenAI ---
-  { id: 'gpt-4.1', company: 'openai', name: 'GPT-4.1', apiModel: 'gpt-4.1', tagline: 'Flagship, great for coding', price: { in: 2.0, out: 8.0 }, vision: true, pdf: true },
-  { id: 'gpt-4.1-mini', company: 'openai', name: 'GPT-4.1 mini', apiModel: 'gpt-4.1-mini', tagline: 'Fast and affordable', price: { in: 0.4, out: 1.6 }, vision: true, pdf: true },
-  { id: 'gpt-4o', company: 'openai', name: 'GPT-4o', apiModel: 'gpt-4o', tagline: 'Multimodal all-rounder', price: { in: 2.5, out: 10.0 }, vision: true, pdf: true },
-  // Example for future models — point apiModel at the real API id when released:
-  // { id: 'chatgpt-5.5', company: 'openai', name: 'ChatGPT 5.5', apiModel: 'gpt-5.5', tagline: 'Next-gen flagship' },
+// --- cache ---------------------------------------------------------------
 
-  // --- Anthropic ---
-  { id: 'claude-opus-4', company: 'anthropic', name: 'Claude Opus 4', apiModel: 'claude-opus-4-20250514', tagline: 'Most capable Claude', price: { in: 15.0, out: 75.0 }, vision: true, pdf: true },
-  { id: 'claude-sonnet-4', company: 'anthropic', name: 'Claude Sonnet 4', apiModel: 'claude-sonnet-4-20250514', tagline: 'Balanced speed & quality', price: { in: 3.0, out: 15.0 }, vision: true, pdf: true },
-  { id: 'claude-3.5-haiku', company: 'anthropic', name: 'Claude 3.5 Haiku', apiModel: 'claude-3-5-haiku-20241022', tagline: 'Fastest Claude', price: { in: 0.8, out: 4.0 }, vision: true, pdf: true },
+let companies = []; // public company objects, ordered
+let models = []; // public model objects, ordered
+const companyById = new Map();
+const modelById = new Map();
+const apiKeys = new Map(); // companyId -> plaintext key, PRIVATE to this module
+let loadedAt = null;
+let usingFallback = true;
 
-  // --- Google ---
-  // Gemini 2.x is gone: 2.5-flash 404s ("no longer available to new users") and
-  // 2.0-flash / 2.5-pro return 429 with `limit: 0` — no free-tier quota is allocated
-  // for them any more. Pro-class models have no free tier at all, so they are omitted
-  // here; add gemini-3.1-pro-preview ($2/$12) only once billing is enabled.
-  // gemini-3.5-flash-lite is deliberately absent: its stream hangs forever under the
-  // deprecated @google/generative-ai SDK roughly 2 out of 3 calls (verified 2026-07-29).
-  // Nothing throws, so the request never resolves and the UI spins until nginx times
-  // out. Re-add it once this provider is migrated to the current @google/genai SDK.
-  { id: 'gemini-3.6-flash', company: 'google', name: 'Gemini 3.6 Flash', apiModel: 'gemini-3.6-flash', tagline: 'Flagship Flash', price: { in: 1.5, out: 7.5 }, vision: true, pdf: true },
-  { id: 'gemini-3.1-flash-lite', company: 'google', name: 'Gemini 3.1 Flash-Lite', apiModel: 'gemini-3.1-flash-lite', tagline: 'Fast and cheapest', price: { in: 0.25, out: 1.5 }, vision: true, pdf: true },
+/** Normalizes a stored/seeded company into the object the app passes around. */
+function toPublicCompany(doc) {
+  return {
+    id: doc.slug || doc.id,
+    name: doc.name,
+    adapter: doc.adapter || 'openai',
+    envKey: doc.envKey ?? null,
+    baseURL: doc.baseURL ?? null,
+    baseUrlEnv: doc.baseUrlEnv ?? null,
+    requiresKey: doc.requiresKey !== false,
+    color: doc.color || '#71717a',
+    pricingUrl: doc.pricingUrl ?? null,
+    docsUrl: doc.docsUrl ?? null,
+    notes: doc.notes ?? null,
+    active: doc.active !== false,
+    sortOrder: typeof doc.sortOrder === 'number' ? doc.sortOrder : 100,
+  };
+}
 
-  // --- Moonshot AI (Kimi) ---
-  { id: 'kimi-k3', company: 'moonshot', name: 'Kimi K3', apiModel: 'kimi-k3', tagline: 'Flagship, 1M context', price: { in: 3.0, out: 15.0 }, vision: true, pdf: false },
-  { id: 'kimi-k2.7-code', company: 'moonshot', name: 'Kimi K2.7 Code', apiModel: 'kimi-k2.7-code', tagline: 'Dedicated coding model, 256k', price: { in: 0.95, out: 4.0 }, vision: true, pdf: false },
-  { id: 'kimi-k2.7-code-highspeed', company: 'moonshot', name: 'Kimi K2.7 Code HS', apiModel: 'kimi-k2.7-code-highspeed', tagline: '~180 tok/s coding', price: { in: 1.9, out: 8.0 }, vision: true, pdf: false },
-  { id: 'kimi-k2.6', company: 'moonshot', name: 'Kimi K2.6', apiModel: 'kimi-k2.6', tagline: 'Multimodal, 256k', price: { in: 0.95, out: 4.0 }, vision: true, pdf: false },
+/** Normalizes a stored/seeded model. `price` is omitted unless both rates exist. */
+function toPublicModel(doc) {
+  const rawIn = doc.price?.in;
+  const rawOut = doc.price?.out;
+  const priced = typeof rawIn === 'number' && typeof rawOut === 'number';
+  return {
+    id: doc.slug || doc.id,
+    company: doc.company,
+    name: doc.name,
+    apiModel: doc.apiModel,
+    tagline: doc.tagline ?? null,
+    // Omitted when unpriced: the client treats a missing `price` as "show tokens
+    // only", and a half-filled { in: null } would compute NaN costs.
+    ...(priced
+      ? {
+          price: {
+            in: rawIn,
+            out: rawOut,
+            ...(typeof doc.price?.cachedIn === 'number' ? { cachedIn: doc.price.cachedIn } : {}),
+          },
+        }
+      : {}),
+    currency: doc.currency || 'USD',
+    priceSource: doc.priceSource || 'seed',
+    priceUpdatedAt: doc.priceUpdatedAt ?? null,
+    vision: Boolean(doc.vision),
+    pdf: Boolean(doc.pdf),
+    contextWindow: doc.contextWindow ?? null,
+    maxOutput: doc.maxOutput ?? null,
+    pricingUrl: doc.pricingUrl ?? null,
+    active: doc.active !== false,
+    sortOrder: typeof doc.sortOrder === 'number' ? doc.sortOrder : 100,
+  };
+}
 
-  // --- DeepSeek (text-only — pair with a vision model for images) ---
-  { id: 'deepseek-v4-pro', company: 'deepseek', name: 'DeepSeek V4 Pro', apiModel: 'deepseek-v4-pro', tagline: 'Flagship, 1M context', price: { in: 0.435, out: 0.87 }, vision: false, pdf: false },
-  { id: 'deepseek-v4-flash', company: 'deepseek', name: 'DeepSeek V4 Flash', apiModel: 'deepseek-v4-flash', tagline: 'Fast and very cheap, 1M context', price: { in: 0.14, out: 0.28 }, vision: false, pdf: false },
+function applyCache({ companyList, modelList, fallback }) {
+  companies = companyList;
+  models = modelList;
+  companyById.clear();
+  modelById.clear();
+  for (const c of companies) companyById.set(c.id, c);
+  for (const m of models) modelById.set(m.id, m);
+  usingFallback = Boolean(fallback);
+  loadedAt = new Date();
+}
 
-  // --- Mistral ---
-  { id: 'mistral-medium-3.5', company: 'mistral', name: 'Mistral Medium 3.5', apiModel: 'mistral-medium-2604', tagline: 'Frontier multimodal, coding', price: { in: 1.5, out: 7.5 }, vision: true, pdf: true },
-  { id: 'mistral-small-4', company: 'mistral', name: 'Mistral Small 4', apiModel: 'mistral-small-2603', tagline: 'Instruct + reasoning + coding', price: { in: 0.3, out: 0.9 }, vision: true, pdf: true },
-  { id: 'mistral-large-3', company: 'mistral', name: 'Mistral Large 3', apiModel: 'mistral-large-2512', tagline: 'Open-weight general purpose', price: { in: 2.0, out: 6.0 }, vision: true, pdf: true },
-  { id: 'codestral', company: 'mistral', name: 'Codestral', apiModel: 'codestral-2508', tagline: 'Code completion specialist', price: { in: 0.3, out: 0.9 }, vision: false, pdf: false },
-  { id: 'ministral-3-8b', company: 'mistral', name: 'Ministral 3 8B', apiModel: 'ministral-8b-2512', tagline: 'Efficient, small-footprint', price: { in: 0.1, out: 0.1 }, vision: true, pdf: true },
+/** Seed defaults, used before the first successful DB load and if one fails. */
+function loadFallback() {
+  applyCache({
+    companyList: SEED_COMPANIES.map((c, i) => toPublicCompany({ ...c, sortOrder: i * 10 })),
+    modelList: SEED_MODELS.map((m, i) => toPublicModel({ ...m, sortOrder: i * 10 })),
+    fallback: true,
+  });
+  apiKeys.clear();
+}
 
-  // --- Z.ai (GLM) ---
-  { id: 'glm-5.2', company: 'zai', name: 'GLM-5.2', apiModel: 'glm-5.2', tagline: 'Latest flagship', price: { in: 1.4, out: 4.4 }, vision: false, pdf: false },
-  { id: 'glm-5-turbo', company: 'zai', name: 'GLM-5-Turbo', apiModel: 'glm-5-turbo', tagline: 'Built for coding agents', price: { in: 1.2, out: 4.0 }, vision: false, pdf: false },
-  { id: 'glm-4.7', company: 'zai', name: 'GLM-4.7', apiModel: 'glm-4.7', tagline: 'Great value all-rounder', price: { in: 0.6, out: 2.2 }, vision: false, pdf: false },
-  { id: 'glm-4.6', company: 'zai', name: 'GLM-4.6', apiModel: 'glm-4.6', tagline: 'Previous-gen workhorse', price: { in: 0.6, out: 2.2 }, vision: false, pdf: false },
-  { id: 'glm-4.5-flash', company: 'zai', name: 'GLM-4.5-Flash', apiModel: 'glm-4.5-flash', tagline: 'Free tier', price: { in: 0, out: 0 }, vision: false, pdf: false },
-  { id: 'glm-4.6v', company: 'zai', name: 'GLM-4.6V', apiModel: 'glm-4.6v', tagline: 'Vision model — great for the image slot', price: { in: 0.3, out: 0.9 }, vision: true, pdf: false },
-  { id: 'glm-4.6v-flash', company: 'zai', name: 'GLM-4.6V-Flash', apiModel: 'glm-4.6v-flash', tagline: 'Free vision model', price: { in: 0, out: 0 }, vision: true, pdf: false },
+loadFallback();
 
-  // --- Demo (works without any API key, streams a sample artifact) ---
-  { id: 'demo-artist', company: 'demo', name: 'Demo Artist', apiModel: 'demo-artist', tagline: 'Offline demo with live artifact', price: { in: 0, out: 0 }, vision: false, pdf: false },
-  { id: 'demo-vision', company: 'demo', name: 'Demo Vision', apiModel: 'demo-vision', tagline: 'Offline demo image describer', price: { in: 0, out: 0 }, vision: true, pdf: false },
-];
+// --- loading -------------------------------------------------------------
 
-export const getModel = (modelId) => MODELS.find((m) => m.id === modelId);
-export const getCompany = (companyId) => COMPANIES.find((c) => c.id === companyId);
-export const isCompanyAvailable = (company) =>
-  !company.envKey || Boolean(process.env[company.envKey]);
+/**
+ * Refreshes the cache from MongoDB. Call at boot and after every admin write.
+ * Returns { companies, models } counts. On failure the previous cache is kept
+ * (or the seed defaults, if nothing was ever loaded) and the error is rethrown.
+ */
+export async function reloadRegistry() {
+  // apiKeyEncrypted is `select: false` on the schema — ask for it explicitly.
+  const providerDocs = await Provider.find({})
+    .select('+apiKeyEncrypted')
+    .sort({ sortOrder: 1, name: 1 })
+    .lean();
+  const modelDocs = await LlmModel.find({}).sort({ sortOrder: 1, name: 1 }).lean();
+
+  if (!providerDocs.length && !modelDocs.length) {
+    // Empty database (e.g. seeding failed). Keep the defaults rather than
+    // serving an app with no models at all.
+    loadFallback();
+    return { companies: companies.length, models: models.length, fallback: true };
+  }
+
+  applyCache({
+    companyList: providerDocs.map(toPublicCompany),
+    modelList: modelDocs.map(toPublicModel),
+    fallback: false,
+  });
+
+  apiKeys.clear();
+  for (const doc of providerDocs) {
+    if (!doc.apiKeyEncrypted) continue;
+    const plain = decryptSecret(doc.apiKeyEncrypted);
+    if (plain) apiKeys.set(doc.slug, plain);
+  }
+
+  return { companies: companies.length, models: models.length, fallback: false };
+}
+
+/**
+ * Inserts any seed company/model that isn't in the DB yet. Existing rows are
+ * left completely alone, so an admin's edits are never clobbered by a restart
+ * or a redeploy. Returns what it created.
+ */
+export async function seedRegistry() {
+  const existingProviders = new Set((await Provider.find({}).select('slug').lean()).map((p) => p.slug));
+  const existingModels = new Set((await LlmModel.find({}).select('slug').lean()).map((m) => m.slug));
+
+  const newProviders = SEED_COMPANIES.filter((c) => !existingProviders.has(c.id)).map((c, i) => ({
+    slug: c.id,
+    name: c.name,
+    adapter: c.adapter,
+    envKey: c.envKey,
+    baseURL: c.baseURL,
+    baseUrlEnv: c.baseUrlEnv,
+    requiresKey: c.requiresKey,
+    color: c.color,
+    pricingUrl: c.pricingUrl,
+    docsUrl: c.docsUrl,
+    active: true,
+    sortOrder: (existingProviders.size + i) * 10,
+  }));
+
+  const newModels = SEED_MODELS.filter((m) => !existingModels.has(m.id)).map((m, i) => ({
+    slug: m.id,
+    company: m.company,
+    name: m.name,
+    apiModel: m.apiModel,
+    tagline: m.tagline,
+    price: {
+      in: m.price?.in ?? null,
+      out: m.price?.out ?? null,
+      cachedIn: null,
+    },
+    currency: 'USD',
+    priceSource: 'seed',
+    vision: Boolean(m.vision),
+    pdf: Boolean(m.pdf),
+    contextWindow: m.contextWindow ?? null,
+    maxOutput: m.maxOutput ?? null,
+    // Carried through so a seed entry can ship a caveat (an introductory price
+    // that expires, a model with a known SDK bug) instead of losing it on insert.
+    pricingUrl: m.pricingUrl ?? null,
+    notes: m.notes ?? null,
+    active: true,
+    sortOrder: (existingModels.size + i) * 10,
+  }));
+
+  if (newProviders.length) await Provider.insertMany(newProviders, { ordered: false });
+  if (newModels.length) await LlmModel.insertMany(newModels, { ordered: false });
+
+  return { companies: newProviders.length, models: newModels.length };
+}
+
+/** Boot helper: seed what's missing, then load. Never throws — logs and falls back. */
+export async function initRegistry() {
+  // Seeding is best-effort and isolated from loading: a duplicate-key race
+  // between two starting processes must not stop us from serving the registry
+  // that is already in the database.
+  try {
+    const seeded = await seedRegistry();
+    if (seeded.companies || seeded.models) {
+      console.log(
+        `[registry] seeded ${seeded.companies} company/companies and ${seeded.models} model(s) from the defaults`
+      );
+    }
+  } catch (err) {
+    console.error(`[registry] seeding skipped: ${err.message}`);
+  }
+
+  try {
+    const loaded = await reloadRegistry();
+    console.log(
+      `[registry] loaded ${loaded.companies} companies and ${loaded.models} models from MongoDB`
+    );
+    return loaded;
+  } catch (err) {
+    console.error(
+      `[registry] could not load from MongoDB (${err.message}) — falling back to the built-in defaults`
+    );
+    loadFallback();
+    return { companies: companies.length, models: models.length, fallback: true };
+  }
+}
+
+/** Diagnostics for the dashboard health panel. */
+export function registryStatus() {
+  return {
+    loadedAt,
+    usingFallback,
+    companies: companies.length,
+    models: models.length,
+    activeCompanies: companies.filter((c) => c.active).length,
+    activeModels: models.filter((m) => m.active).length,
+    keysInDb: apiKeys.size,
+  };
+}
+
+// --- lookups -------------------------------------------------------------
+
+/**
+ * All companies. Inactive ones are hidden by default: the chat UI must not offer
+ * a company an admin switched off, while the dashboard passes includeInactive.
+ */
+export function listCompanies({ includeInactive = false } = {}) {
+  return includeInactive ? [...companies] : companies.filter((c) => c.active);
+}
+
+export function listModels({ includeInactive = false } = {}) {
+  if (includeInactive) return [...models];
+  const activeCompanies = new Set(companies.filter((c) => c.active).map((c) => c.id));
+  return models.filter((m) => m.active && activeCompanies.has(m.company));
+}
+
+/**
+ * Looks up a model regardless of `active`. Deliberate: an existing conversation
+ * can reference a model an admin has since switched off, and "this model was
+ * disabled" is a far better error than "Unknown modelId". `streamChat` is what
+ * enforces active-ness at call time.
+ */
+export function getModel(modelId) {
+  return modelById.get(modelId) || null;
+}
+
+export function getCompany(companyId) {
+  return companyById.get(companyId) || null;
+}
+
+/** Models belonging to one company (all of them, active or not). */
+export function modelsForCompany(companyId) {
+  return models.filter((m) => m.company === companyId);
+}
+
+/**
+ * Why a model may not be chosen for a new conversation (or switched to), or null
+ * when it's fine. Used where a clear 400 beats letting the request reach the
+ * provider — creating a chat, changing a chat's model.
+ */
+export function modelUnavailableReason(model) {
+  if (!model) return 'Unknown modelId';
+  const company = getCompany(model.company);
+  if (!company) return `Unknown company: ${model.company}`;
+  if (!model.active) return `${model.name} is currently disabled.`;
+  if (!company.active) return `${company.name} is currently disabled.`;
+  return null;
+}
+
+// --- credentials ---------------------------------------------------------
+
+/**
+ * The API key for a company: the one stored in the DB wins, the env var is the
+ * fallback. Returns null when neither is set. This is the ONLY way to get a key
+ * out of the registry.
+ */
+export function resolveApiKey(company) {
+  if (!company) return null;
+  const stored = apiKeys.get(company.id);
+  if (stored) return stored;
+  if (company.envKey) {
+    const fromEnv = process.env[company.envKey];
+    if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  }
+  return null;
+}
+
+/** 'db' | 'env' | 'none' — shown in the dashboard so it's clear what's in play. */
+export function keySource(company) {
+  if (!company) return 'none';
+  if (apiKeys.has(company.id)) return 'db';
+  if (company.envKey && process.env[company.envKey]?.trim()) return 'env';
+  return 'none';
+}
+
+/** Base URL for the provider: DB value wins, then its env override, then null. */
+export function resolveBaseURL(company) {
+  if (!company) return null;
+  if (company.baseURL && company.baseURL.trim()) return company.baseURL.trim();
+  if (company.baseUrlEnv) {
+    const fromEnv = process.env[company.baseUrlEnv];
+    if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  }
+  return null;
+}
+
+/**
+ * True when a company can actually be called: it needs no key (Demo), or a key
+ * is available from the DB or the environment. Says nothing about `active` —
+ * the chat UI shows inactive companies as absent, not as "no key".
+ */
+export function isCompanyAvailable(company) {
+  if (!company) return false;
+  if (!company.requiresKey) return true;
+  return Boolean(resolveApiKey(company));
+}

@@ -101,6 +101,106 @@ export const api = {
   logout: () => request('/auth/logout', { method: 'POST' }),
 };
 
+// The admin API sits under the same private segment as the dashboard (see
+// server/src/config/adminPath.js). It is learned at runtime from /api/auth/me, so
+// it is never present in the shipped bundle; calling an admin endpoint before
+// that resolves is a programming error and throws rather than hitting /api/null.
+let adminPrefix = null;
+
+export function setAdminApiPath(segment) {
+  adminPrefix = segment || null;
+}
+
+const adminUrl = (suffix) => {
+  if (!adminPrefix) {
+    throw new Error('The admin API path is not known yet — sign in as an administrator first.');
+  }
+  return `/${adminPrefix}${suffix}`;
+};
+
+const qs = (params = {}) => {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    search.set(key, String(value));
+  }
+  const s = search.toString();
+  return s ? `?${s}` : '';
+};
+
+/**
+ * Admin dashboard API, served under the private segment (`/api/<secret>/*`).
+ * Every one of these is behind requireAdmin server-side — a non-admin gets 403
+ * with code ADMIN_REQUIRED, which the dashboard turns into a "you don't have
+ * access" screen, and a wrong segment gets a plain 404 like any unknown path.
+ *
+ * Provider API keys are write-only across this boundary: `setProviderKey` sends
+ * one, and nothing ever returns one. The dashboard renders `hasKey`, `keySource`
+ * and `apiKeyLast4` instead.
+ */
+export const adminApi = {
+  overview: () => request(adminUrl('/overview')),
+
+  listProviders: () => request(adminUrl('/providers')),
+  createProvider: (body) =>
+    request(adminUrl('/providers'), { method: 'POST', body: JSON.stringify(body) }),
+  updateProvider: (slug, patch) =>
+    request(adminUrl(`/providers/${encodeURIComponent(slug)}`), {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  deleteProvider: (slug) =>
+    request(adminUrl(`/providers/${encodeURIComponent(slug)}`), { method: 'DELETE' }),
+  setProviderKey: (slug, apiKey) =>
+    request(adminUrl(`/providers/${encodeURIComponent(slug)}/key`), {
+      method: 'POST',
+      body: JSON.stringify({ apiKey }),
+    }),
+  clearProviderKey: (slug) =>
+    request(adminUrl(`/providers/${encodeURIComponent(slug)}/key`), { method: 'DELETE' }),
+  testProviderKey: (slug) =>
+    request(adminUrl(`/providers/${encodeURIComponent(slug)}/key/test`), { method: 'POST' }),
+  discoverModels: (slug) =>
+    request(adminUrl(`/providers/${encodeURIComponent(slug)}/discover-models`), { method: 'POST' }),
+
+  listModels: (params) => request(adminUrl(`/models${qs(params)}`)),
+  createModel: (body) => request(adminUrl('/models'), { method: 'POST', body: JSON.stringify(body) }),
+  updateModel: (slug, patch) =>
+    request(adminUrl(`/models/${encodeURIComponent(slug)}`), {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  deleteModel: (slug, { force = false } = {}) =>
+    request(adminUrl(`/models/${encodeURIComponent(slug)}${qs({ force: force ? 1 : '' })}`), {
+      method: 'DELETE',
+    }),
+  bulkSetModelActive: (slugs, active) =>
+    request(adminUrl('/models/bulk-active'), {
+      method: 'POST',
+      body: JSON.stringify({ slugs, active }),
+    }),
+
+  fetchPrices: (body) =>
+    request(adminUrl('/prices/fetch'), { method: 'POST', body: JSON.stringify(body) }),
+  listProposals: (params) => request(adminUrl(`/prices/proposals${qs(params)}`)),
+  getProposal: (id) => request(adminUrl(`/prices/proposals/${encodeURIComponent(id)}`)),
+  applyProposal: (id, itemIds) =>
+    request(adminUrl(`/prices/proposals/${encodeURIComponent(id)}/apply`), {
+      method: 'POST',
+      body: JSON.stringify({ itemIds }),
+    }),
+  discardProposal: (id) =>
+    request(adminUrl(`/prices/proposals/${encodeURIComponent(id)}/discard`), { method: 'POST' }),
+
+  getSettings: () => request(adminUrl('/settings')),
+  updateSettings: (patch) =>
+    request(adminUrl('/settings'), { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  reloadRegistry: () => request(adminUrl('/registry/reload'), { method: 'POST' }),
+  reseedRegistry: () => request(adminUrl('/registry/reseed'), { method: 'POST' }),
+  audit: (params) => request(adminUrl(`/audit${qs(params)}`)),
+};
+
 /**
  * POSTs a user message and consumes the SSE stream of the assistant reply.
  * Events: start | token | status | done | error — see server/routes/conversations.js.

@@ -21,12 +21,15 @@ function toOpenAIMessage(m) {
   };
 }
 
-export async function streamChat({ apiKey, baseURL, apiModel, messages, system, signal, onToken }) {
+export async function streamChat({ apiKey, baseURL, apiModel, messages, system, signal, onToken, maxTokens }) {
   const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   const stream = await client.chat.completions.create(
     {
       model: apiModel,
       stream: true,
+      // Only set when a caller needs a hard cap (the dashboard's key test asks for
+      // a single token). Left unset for chat so each model uses its own default.
+      ...(maxTokens ? { max_tokens: maxTokens } : {}),
       // Ask OpenAI-compatible APIs to include a usage object in the final chunk.
       stream_options: { include_usage: true },
       messages: [

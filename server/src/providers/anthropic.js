@@ -16,12 +16,14 @@ function toAnthropicMessage(m) {
   };
 }
 
-export async function streamChat({ apiKey, apiModel, messages, system, signal, onToken }) {
-  const client = new Anthropic({ apiKey });
+export async function streamChat({ apiKey, baseURL, apiModel, messages, system, signal, onToken, maxTokens }) {
+  // baseURL lets an admin point this adapter at an Anthropic-compatible gateway
+  // (added from the dashboard as a new company) without a code change.
+  const client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
   const stream = await client.messages.create(
     {
       model: apiModel,
-      max_tokens: 8192,
+      max_tokens: maxTokens || 8192,
       ...(system ? { system } : {}),
       messages: messages.map(toAnthropicMessage),
       stream: true,

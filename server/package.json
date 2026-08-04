@@ -7,7 +7,8 @@
   "scripts": {
     "test": "node --test src/**/*.test.js",
     "dev": "node --watch src/index.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "make-admin": "node scripts/make-admin.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
