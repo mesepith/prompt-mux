@@ -50,6 +50,7 @@ import {
 } from '../lib/secrets.js';
 import { hitLimit } from '../lib/rateLimit.js';
 import { adminPathSegment, updateAdminPath } from '../config/adminPath.js';
+import { buildFetchPlan, estimatePlanCost } from '../lib/pricePlan.js';
 import { fetchTextUrl } from '../lib/fetchUrl.js';
 import { htmlToText, stripMdxArtifacts } from '../lib/htmlText.js';
 import {
@@ -97,6 +98,9 @@ const PAGE_FETCH_TIMEOUT_MS = 20_000;
 const PAGE_MAX_BYTES = 4_000_000;
 const RAW_EXCERPT_CHARS = 4000;
 const AUTO_APPLY_CONFIDENCE = 0.7;
+// Ceiling on pages one batch fetch will read, so a company with many per-model
+// pages can't turn a single click into dozens of paid calls.
+const MAX_BATCH_FETCH = 12;
 
 // A price fetch makes an outbound HTTP request AND a paid model call, so it is
 // throttled per administrator even though the route is already behind auth.
@@ -1497,23 +1501,313 @@ router.delete(
  * failure is still persisted (status 'failed', answered with 200) so the
  * dashboard can show what went wrong instead of a bare toast.
  */
+/**
+ * Runs one page → proposal cycle: fetch, reduce to text, extract with the admin
+ * model, persist. Shared by the single-page route and the multi-page batch so the
+ * two can never drift apart on validation, billing or auto-apply.
+ *
+ * Always resolves — a failure becomes a persisted `failed` proposal rather than a
+ * throw, because the dashboard has to be able to show what went wrong. The caller
+ * owns rate limiting; by the time this is called the slot is already reserved.
+ */
+async function runPriceFetch({ company, model, sourceUrl, settings, adminModel, admin, req }) {
+  const providerSlug = company.id;
+  const base = {
+    scope: model ? 'model' : 'provider',
+    providerSlug,
+    modelSlug: model?.id || null,
+    sourceUrl,
+    adminModelId: adminModel.id,
+    createdBy: admin._id,
+  };
+
+  // The prompt only describes what we want priced; matching accepts every model of
+  // the company so a row for a switched-off model can still be applied.
+  // priceExtract works in its own vocabulary (`slug`, `currentIn`, `currentOut`);
+  // registry objects use `id` and a nested `price`. Translate once, here, rather
+  // than letting either side guess about the other.
+  const forExtractor = (m) => ({
+    slug: m.id,
+    name: m.name,
+    apiModel: m.apiModel,
+    currentIn: m.price?.in ?? null,
+    currentOut: m.price?.out ?? null,
+  });
+  const promptModels = (
+    model ? [model] : modelsForCompany(providerSlug).filter((m) => m.active)
+  ).map(forExtractor);
+  const matchModels = (model ? [model] : modelsForCompany(providerSlug)).map(forExtractor);
+
+  let page = null;
+  let reply = '';
+  let usage = null;
+  try {
+    const fetched = await fetchTextUrl(sourceUrl, {
+      timeoutMs: PAGE_FETCH_TIMEOUT_MS,
+      maxBytes: PAGE_MAX_BYTES,
+    });
+    const raw = typeof fetched === 'string' ? fetched : fetched?.text ?? fetched?.body ?? '';
+    // Several vendors serve a markdown twin of every docs page (append `.md`),
+    // which is a far cleaner and cheaper source than the rendered HTML — the
+    // pricing table arrives as a pipe table with no navigation chrome. Running
+    // the HTML stripper over it would only risk mangling it, so pass it through.
+    const isHtml = /^\s*<(?:!doctype|html|head|body)/i.test(raw.slice(0, 200));
+    if (isHtml) {
+      page = htmlToText(raw, { maxChars: settings.fetchMaxChars });
+    } else {
+      const cleaned = stripMdxArtifacts(raw);
+      page = {
+        text: cleaned.slice(0, settings.fetchMaxChars),
+        chars: cleaned.length,
+        truncated: cleaned.length > settings.fetchMaxChars,
+      };
+    }
+
+    // Bail before spending tokens when the page plainly carries no per-token
+    // pricing. Some vendors render pricing entirely in the browser, so a
+    // server-side fetch sees only marketing copy and subscription tiers — and
+    // asking a model to read that either wastes a call or, worse, tempts it into
+    // reporting "$14.99/mo" as a token price.
+    if (!hasPricingSignal(page.text)) {
+      throw new Error(
+        'The fetched page contains no per-token pricing text. It is most likely rendered by JavaScript, ' +
+          'which a server-side fetch cannot see. Point this at a documentation page that ships the ' +
+          'pricing table in HTML, or enter the prices by hand on the Models tab.'
+      );
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PRICE_MODEL_TIMEOUT_MS);
+    try {
+      const result = await streamChat({
+        model: adminModel,
+        messages: [
+          {
+            role: 'user',
+            content: buildPricePrompt({
+              pageText: page.text,
+              sourceUrl,
+              companyName: company.name,
+              models: promptModels,
+            }),
+          },
+        ],
+        system: PRICE_SYSTEM_PROMPT,
+        signal: controller.signal,
+        onToken: () => {},
+      });
+      reply = result.content || '';
+      usage = result.usage || null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    const failed = await PriceProposal.create({
+      ...base,
+      status: 'failed',
+      error: (err?.message || 'The price fetch failed').slice(0, 500),
+      pageChars: page?.chars ?? null,
+      usedChars: page?.text?.length ?? null,
+      truncated: Boolean(page?.truncated),
+      usage,
+    });
+    // Only bill a ledger row when the model was actually reached. A URL blocked
+    // by the SSRF guard, or a page with no pricing on it, never reaches the
+    // provider — recording those as spend would inflate the figure with calls
+    // that cost nothing.
+    const failedCost = priceUsage(adminModel.id, usage);
+    if (usage) {
+      recordAdminUsage({
+        kind: 'price_fetch',
+        modelId: adminModel.id,
+        usage,
+        targetProviderSlug: providerSlug,
+        targetModelSlug: base.modelSlug,
+        sourceUrl,
+        proposalId: failed._id,
+        ok: false,
+        error: failed.error,
+        admin,
+      });
+    }
+    adminAudit(req, 'admin_price_fetched', {
+      providerSlug,
+      modelSlug: base.modelSlug,
+      sourceUrl,
+      adminModelId: adminModel.id,
+      status: 'failed',
+      error: failed.error,
+      tokens: usage?.totalTokens ?? 0,
+      costUsd: failedCost.costUsd,
+    });
+    return { proposal: failed, costUsd: failedCost.costUsd, tokens: usage?.totalTokens ?? 0 };
+  }
+
+  const parsed = parsePriceReply(reply) || {};
+  const rawItems = Array.isArray(parsed) ? parsed : parsed.items || [];
+  const matched = matchProposalItems({ items: rawItems, models: matchModels }) || {};
+  const items = Array.isArray(matched) ? matched : matched.items || [];
+  const warnings = [...(parsed.warnings || []), ...(matched.warnings || [])].slice(0, 20);
+
+  let proposal = await PriceProposal.create({
+    ...base,
+    status: 'ready',
+    // The registry snapshot has to live in the proposal, or a later edit would
+    // silently rewrite the "before" side of the diff.
+    items: items.map((item) => {
+      const target = item.modelSlug ? getModel(item.modelSlug) : null;
+      return {
+        ...item,
+        currentIn: item.currentIn ?? target?.price?.in ?? null,
+        currentOut: item.currentOut ?? target?.price?.out ?? null,
+      };
+    }),
+    warnings,
+    pageChars: page.chars ?? null,
+    usedChars: page.text?.length ?? null,
+    truncated: Boolean(page.truncated),
+    rawExcerpt: reply.slice(0, RAW_EXCERPT_CHARS),
+    usage,
+  });
+
+  const fetchCost = priceUsage(adminModel.id, usage);
+  recordAdminUsage({
+    kind: 'price_fetch',
+    modelId: adminModel.id,
+    usage,
+    targetProviderSlug: providerSlug,
+    targetModelSlug: base.modelSlug,
+    sourceUrl,
+    proposalId: proposal._id,
+    ok: true,
+    admin,
+  });
+
+  adminAudit(req, 'admin_price_fetched', {
+    providerSlug,
+    modelSlug: base.modelSlug,
+    sourceUrl,
+    adminModelId: adminModel.id,
+    status: 'ready',
+    itemCount: proposal.items.length,
+    warnings: warnings.length,
+    // Recorded on the audit row too, so the Activity feed shows what each
+    // fetch cost without a join against the usage ledger.
+    tokens: usage?.totalTokens ?? 0,
+    costUsd: fetchCost.costUsd,
+  });
+
+  if (!settings.requireApproval) {
+    const confident = proposal.items
+      .filter(
+        (item) =>
+          item.modelSlug && typeof item.confidence === 'number' && item.confidence >= AUTO_APPLY_CONFIDENCE
+      )
+      .map((item) => String(item._id));
+    if (confident.length) {
+      const applied = await applyProposalItems({
+        proposal,
+        itemIds: confident,
+        admin,
+        req,
+        // Nobody is watching this path, so an ambiguous model is left for a
+        // human rather than resolved by guesswork.
+        onDuplicate: 'skip',
+      });
+      proposal = applied.proposal;
+    }
+  }
+
+  return { proposal, costUsd: fetchCost.costUsd, tokens: usage?.totalTokens ?? 0 };
+}
+
+/**
+ * Resolves the company (and optional model) a price request is about.
+ * Throws the same 404/400s both price routes need.
+ */
+function resolvePriceTarget(body) {
+  const providerSlug = pickSlug(body.providerSlug, 'providerSlug');
+  const company = getCompany(providerSlug);
+  if (!company) throw notFound(`No company with slug "${providerSlug}"`);
+
+  let model = null;
+  if (body.modelSlug) {
+    const modelSlug = pickSlug(body.modelSlug, 'modelSlug');
+    model = getModel(modelSlug);
+    if (!model) throw notFound(`No model with slug "${modelSlug}"`);
+    if (model.company !== providerSlug) {
+      throw badRequest(`${model.name} does not belong to ${company.name}`);
+    }
+  }
+  return { company, model };
+}
+
+/** 429 unless `cost` fetch slots are available for this admin. */
+function reserveFetchSlots(req, cost) {
+  const limit = hitLimit(`admin-price-fetch:${req.admin._id}`, PRICE_FETCH_LIMIT, cost);
+  if (limit.ok) return null;
+  return {
+    error:
+      cost > 1
+        ? `That would be ${cost} price fetches and your remaining allowance is smaller. Try again in ${Math.ceil(limit.retryAfterMs / 60000)} minute(s), or fetch models one at a time.`
+        : `Too many price fetches. Try again in ${Math.ceil(limit.retryAfterMs / 60000)} minute(s).`,
+    retryAfterMs: limit.retryAfterMs,
+  };
+}
+
+/**
+ * GET /prices/plan?providerSlug=X — what a company-level fetch would read, and
+ * roughly what it would cost, WITHOUT spending anything.
+ *
+ * This exists so the dialog can say "3 pages, about $0.002" before the click.
+ * Companies whose vendor publishes one price table need a single call; Kimi and
+ * Qwen publish per model, so those need several.
+ */
+router.get(
+  '/prices/plan',
+  route(async (req, res) => {
+    const { company } = resolvePriceTarget({ providerSlug: req.query.providerSlug });
+    const settings = await getAdminSettings();
+    let adminModel = null;
+    let adminModelError = null;
+    try {
+      adminModel = resolveAdminModel(null, settings);
+    } catch (err) {
+      adminModelError = err.message;
+    }
+
+    const plan = buildFetchPlan(company, modelsForCompany(company.id), { maxCalls: MAX_BATCH_FETCH });
+    const estimate = estimatePlanCost(plan, adminModel);
+
+    res.json({
+      providerSlug: company.id,
+      companyName: company.name,
+      mode: plan.mode,
+      calls: plan.calls,
+      uncovered: plan.uncovered,
+      dropped: plan.dropped,
+      maxCalls: MAX_BATCH_FETCH,
+      adminModel: adminModel
+        ? { id: adminModel.id, name: adminModel.name, company: adminModel.company }
+        : null,
+      adminModelError,
+      estimate,
+    });
+  })
+);
+
+/**
+ * POST /prices/fetch — read ONE pricing page and store the result as a proposal.
+ *
+ * Nothing is written to the registry unless approval is switched off, and a
+ * failure is still persisted (status 'failed', answered with 200) so the
+ * dashboard can show what went wrong instead of a bare toast.
+ */
 router.post(
   '/prices/fetch',
   route(async (req, res) => {
     const body = req.body || {};
-    const providerSlug = pickSlug(body.providerSlug, 'providerSlug');
-    const company = getCompany(providerSlug);
-    if (!company) throw notFound(`No company with slug "${providerSlug}"`);
-
-    let model = null;
-    if (body.modelSlug) {
-      const modelSlug = pickSlug(body.modelSlug, 'modelSlug');
-      model = getModel(modelSlug);
-      if (!model) throw notFound(`No model with slug "${modelSlug}"`);
-      if (model.company !== providerSlug) {
-        throw badRequest(`${model.name} does not belong to ${company.name}`);
-      }
-    }
+    const { company, model } = resolvePriceTarget(body);
 
     const override = pickUrl(body, 'url');
     const sourceUrl = override || (model ? model.pricingUrl || company.pricingUrl : company.pricingUrl);
@@ -1521,7 +1815,7 @@ router.post(
       throw badRequest(
         model
           ? `Neither ${model.name} nor ${company.name} has a pricing URL. Add one, or pass a url with this request.`
-          : `${company.name} has no pricing URL. Add one to the company, or pass a url with this request.`
+          : `${company.name} has no pricing URL of its own. Its models may have their own pages — use the batch fetch, or pass a url with this request.`
       );
     }
 
@@ -1530,220 +1824,89 @@ router.post(
 
     // Charged work starts here, so the throttle sits after validation: a rejected
     // request must not eat an administrator's budget of fetches.
-    const limit = hitLimit(`admin-price-fetch:${req.admin._id}`, PRICE_FETCH_LIMIT);
-    if (!limit.ok) {
-      return res.status(429).json({
-        error: `Too many price fetches. Try again in ${Math.ceil(limit.retryAfterMs / 60000)} minute(s).`,
-        retryAfterMs: limit.retryAfterMs,
-      });
-    }
+    const denied = reserveFetchSlots(req, 1);
+    if (denied) return res.status(429).json(denied);
 
-    const base = {
-      scope: model ? 'model' : 'provider',
-      providerSlug,
-      modelSlug: model?.id || null,
+    const { proposal } = await runPriceFetch({
+      company,
+      model,
       sourceUrl,
-      adminModelId: adminModel.id,
-      createdBy: req.admin._id,
-    };
-    // The prompt only describes what we want priced; matching accepts every model
-    // of the company so a row for a switched-off model can still be applied.
-    // priceExtract works in its own vocabulary (`slug`, `currentIn`, `currentOut`);
-    // registry objects use `id` and a nested `price`. Translate once, here, rather
-    // than letting either side guess about the other.
-    const forExtractor = (m) => ({
-      slug: m.id,
-      name: m.name,
-      apiModel: m.apiModel,
-      currentIn: m.price?.in ?? null,
-      currentOut: m.price?.out ?? null,
-    });
-    const promptModels = (
-      model ? [model] : modelsForCompany(providerSlug).filter((m) => m.active)
-    ).map(forExtractor);
-    const matchModels = (model ? [model] : modelsForCompany(providerSlug)).map(forExtractor);
-
-    let page = null;
-    let reply = '';
-    let usage = null;
-    try {
-      const fetched = await fetchTextUrl(sourceUrl, {
-        timeoutMs: PAGE_FETCH_TIMEOUT_MS,
-        maxBytes: PAGE_MAX_BYTES,
-      });
-      const raw = typeof fetched === 'string' ? fetched : fetched?.text ?? fetched?.body ?? '';
-      // Several vendors serve a markdown twin of every docs page (append `.md`),
-      // which is a far cleaner and cheaper source than the rendered HTML — the
-      // pricing table arrives as a pipe table with no navigation chrome. Running
-      // the HTML stripper over it would only risk mangling it, so pass it through.
-      const isHtml = /^\s*<(?:!doctype|html|head|body)/i.test(raw.slice(0, 200));
-      if (isHtml) {
-        page = htmlToText(raw, { maxChars: settings.fetchMaxChars });
-      } else {
-        const cleaned = stripMdxArtifacts(raw);
-        page = {
-          text: cleaned.slice(0, settings.fetchMaxChars),
-          chars: cleaned.length,
-          truncated: cleaned.length > settings.fetchMaxChars,
-        };
-      }
-
-      // Bail before spending tokens when the page plainly carries no per-token
-      // pricing. Several vendors (Mistral, among others) render pricing entirely
-      // in the browser, so a server-side fetch sees only marketing copy and
-      // subscription tiers — and asking a model to read that either wastes a call
-      // or, worse, tempts it into reporting "$14.99/mo" as a token price.
-      if (!hasPricingSignal(page.text)) {
-        throw new Error(
-          'The fetched page contains no per-token pricing text. It is most likely rendered by JavaScript, ' +
-            'which a server-side fetch cannot see. Point this at a documentation page that ships the ' +
-            'pricing table in HTML, or enter the prices by hand on the Models tab.'
-        );
-      }
-
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), PRICE_MODEL_TIMEOUT_MS);
-      try {
-        const result = await streamChat({
-          model: adminModel,
-          messages: [
-            {
-              role: 'user',
-              content: buildPricePrompt({
-                pageText: page.text,
-                sourceUrl,
-                companyName: company.name,
-                models: promptModels,
-              }),
-            },
-          ],
-          system: PRICE_SYSTEM_PROMPT,
-          signal: controller.signal,
-          onToken: () => {},
-        });
-        reply = result.content || '';
-        usage = result.usage || null;
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch (err) {
-      const failed = await PriceProposal.create({
-        ...base,
-        status: 'failed',
-        error: (err?.message || 'The price fetch failed').slice(0, 500),
-        pageChars: page?.chars ?? null,
-        usedChars: page?.text?.length ?? null,
-        truncated: Boolean(page?.truncated),
-        usage,
-      });
-      // Only bill a ledger row when the model was actually reached. A URL blocked
-      // by the SSRF guard, or a page with no pricing on it, never reaches the
-      // provider — recording those as spend would inflate the figure with calls
-      // that cost nothing.
-      const failedCost = priceUsage(adminModel.id, usage);
-      if (usage) {
-        recordAdminUsage({
-          kind: 'price_fetch',
-          modelId: adminModel.id,
-          usage,
-          targetProviderSlug: providerSlug,
-          targetModelSlug: base.modelSlug,
-          sourceUrl,
-          proposalId: failed._id,
-          ok: false,
-          error: failed.error,
-          admin: req.admin,
-        });
-      }
-      adminAudit(req, 'admin_price_fetched', {
-        providerSlug,
-        modelSlug: base.modelSlug,
-        sourceUrl,
-        adminModelId: adminModel.id,
-        status: 'failed',
-        error: failed.error,
-        tokens: usage?.totalTokens ?? 0,
-        costUsd: failedCost.costUsd,
-      });
-      return res.json({ proposal: proposalResponse(failed) });
-    }
-
-    const parsed = parsePriceReply(reply) || {};
-    const rawItems = Array.isArray(parsed) ? parsed : parsed.items || [];
-    const matched = matchProposalItems({ items: rawItems, models: matchModels }) || {};
-    const items = Array.isArray(matched) ? matched : matched.items || [];
-    const warnings = [...(parsed.warnings || []), ...(matched.warnings || [])].slice(0, 20);
-
-    const proposal = await PriceProposal.create({
-      ...base,
-      status: 'ready',
-      // The registry snapshot has to live in the proposal, or a later edit would
-      // silently rewrite the "before" side of the diff.
-      items: items.map((item) => {
-        const target = item.modelSlug ? getModel(item.modelSlug) : null;
-        return {
-          ...item,
-          currentIn: item.currentIn ?? target?.price?.in ?? null,
-          currentOut: item.currentOut ?? target?.price?.out ?? null,
-        };
-      }),
-      warnings,
-      pageChars: page.chars ?? null,
-      usedChars: page.text?.length ?? null,
-      truncated: Boolean(page.truncated),
-      rawExcerpt: reply.slice(0, RAW_EXCERPT_CHARS),
-      usage,
-    });
-
-    const fetchCost = priceUsage(adminModel.id, usage);
-    recordAdminUsage({
-      kind: 'price_fetch',
-      modelId: adminModel.id,
-      usage,
-      targetProviderSlug: providerSlug,
-      targetModelSlug: base.modelSlug,
-      sourceUrl,
-      proposalId: proposal._id,
-      ok: true,
+      settings,
+      adminModel,
       admin: req.admin,
+      req,
     });
+    res.json({ proposal: proposalResponse(proposal) });
+  })
+);
 
-    adminAudit(req, 'admin_price_fetched', {
-      providerSlug,
-      modelSlug: base.modelSlug,
-      sourceUrl,
-      adminModelId: adminModel.id,
-      status: 'ready',
-      itemCount: proposal.items.length,
-      warnings: warnings.length,
-      // Recorded on the audit row too, so the Activity feed shows what each
-      // fetch cost without a join against the usage ledger.
-      tokens: usage?.totalTokens ?? 0,
-      costUsd: fetchCost.costUsd,
-    });
+/**
+ * POST /prices/fetch-batch — read every page a company's prices are spread over.
+ *
+ * For a vendor with one price table this is the same single call as above. For
+ * Kimi or Qwen it is one call per page, run **sequentially**: a provider being
+ * hammered with parallel requests is a worse neighbour, and sequential keeps the
+ * per-page cost legible in the ledger. The whole allowance is reserved up front so
+ * a batch cannot die half-finished.
+ */
+router.post(
+  '/prices/fetch-batch',
+  route(async (req, res) => {
+    const body = req.body || {};
+    const { company } = resolvePriceTarget(body);
+    const settings = await getAdminSettings();
+    const adminModel = resolveAdminModel(pickString(body, 'adminModelId', 120) || null, settings);
 
-    if (!settings.requireApproval) {
-      const confident = proposal.items
-        .filter(
-          (item) =>
-            item.modelSlug && typeof item.confidence === 'number' && item.confidence >= AUTO_APPLY_CONFIDENCE
-        )
-        .map((item) => String(item._id));
-      if (confident.length) {
-        const applied = await applyProposalItems({
-          proposal,
-          itemIds: confident,
-          admin: req.admin,
-          req,
-          // Nobody is watching this path, so an ambiguous model is left for a
-          // human rather than resolved by guesswork.
-          onDuplicate: 'skip',
-        });
-        return res.json({ proposal: proposalResponse(applied.proposal) });
+    const plan = buildFetchPlan(company, modelsForCompany(company.id), { maxCalls: MAX_BATCH_FETCH });
+    if (plan.mode === 'none') {
+      throw badRequest(
+        `Neither ${company.name} nor any of its models has a pricing URL. Add one to the company, or to each model that prices separately.`
+      );
+    }
+
+    // An explicit subset is allowed, but only from the plan — this endpoint must
+    // not become a way to point the fetcher at arbitrary URLs in bulk.
+    let calls = plan.calls;
+    if (Array.isArray(body.urls) && body.urls.length) {
+      const wanted = new Set(body.urls.map((u) => String(u).trim()));
+      calls = plan.calls.filter((c) => wanted.has(c.url));
+      if (!calls.length) {
+        throw badRequest('None of the supplied urls are part of this company\'s pricing plan.');
       }
     }
 
-    res.json({ proposal: proposalResponse(proposal) });
+    const denied = reserveFetchSlots(req, calls.length);
+    if (denied) return res.status(429).json(denied);
+
+    const results = [];
+    for (const call of calls) {
+      // One model per page means the proposal can be scoped to it, which gives a
+      // tighter prompt; a shared page stays company-scoped so every row matches.
+      const only =
+        call.modelSlugs.length === 1 ? getModel(call.modelSlugs[0]) : null;
+      const result = await runPriceFetch({
+        company,
+        model: only,
+        sourceUrl: call.url,
+        settings,
+        adminModel,
+        admin: req.admin,
+        req,
+      });
+      results.push(result);
+    }
+
+    const proposals = results.map((r) => proposalResponse(r.proposal));
+    res.json({
+      proposals,
+      calls: calls.length,
+      skipped: plan.dropped,
+      uncovered: plan.uncovered,
+      totalTokens: results.reduce((sum, r) => sum + (r.tokens || 0), 0),
+      totalCostUsd: round6(results.reduce((sum, r) => sum + (r.costUsd || 0), 0)),
+      failed: proposals.filter((p) => p.status === 'failed').length,
+      itemCount: proposals.reduce((sum, p) => sum + (p.items?.length || 0), 0),
+    });
   })
 );
 

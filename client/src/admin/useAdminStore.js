@@ -40,6 +40,8 @@ export const useAdminStore = create((set, get) => ({
   editingModel: null, // model object, { company } for "new", or null when closed
   keyPanelSlug: null, // provider slug whose key editor is open
   priceFetchTarget: null, // { providerSlug, modelSlug?, url }
+  fetchPlan: null, // pages a company-level fetch would read + cost estimate
+  fetchPlanLoading: false,
 
   // ---------- helpers ----------
   isBusy: (key) => Boolean(get().busy[key]),
@@ -191,8 +193,25 @@ export const useAdminStore = create((set, get) => ({
   closeModelEditor: () => set({ editingModel: null }),
   openKeyPanel: (slug) => set({ keyPanelSlug: slug }),
   closeKeyPanel: () => set({ keyPanelSlug: null }),
-  openPriceFetch: (target) => set({ priceFetchTarget: target }),
-  closePriceFetch: () => set({ priceFetchTarget: null }),
+  openPriceFetch: (target) => set({ priceFetchTarget: target, fetchPlan: null }),
+  closePriceFetch: () => set({ priceFetchTarget: null, fetchPlan: null }),
+
+  /**
+   * Loads what a company-level fetch would read. Free — no model is called — so
+   * the dialog can state the number of pages and the cost before anything is spent.
+   */
+  loadFetchPlan: async (providerSlug) => {
+    set({ fetchPlanLoading: true });
+    try {
+      const plan = await adminApi.pricePlan(providerSlug);
+      set({ fetchPlan: plan, fetchPlanLoading: false });
+      return plan;
+    } catch (err) {
+      set({ fetchPlan: null, fetchPlanLoading: false });
+      get().showToast('error', err.message);
+      return null;
+    }
+  },
 
   // ---------- providers ----------
   createProvider: (body) =>
@@ -297,6 +316,37 @@ export const useAdminStore = create((set, get) => ({
           n ? `Found ${n} price row(s) — review and apply` : 'No prices found on that page'
         );
       }
+    }
+    return res;
+  },
+
+  /**
+   * Runs a multi-page fetch for a whole company. One proposal comes back per page;
+   * the first is opened for review and the rest wait on the Pricing tab.
+   */
+  fetchPricesBatch: async ({ providerSlug, adminModelId, urls }) => {
+    const key = `price:${providerSlug}`;
+    const res = await get().run(key, () =>
+      adminApi.fetchPricesBatch({ providerSlug, adminModelId, urls })
+    );
+    if (!res.ok) return res;
+    const { proposals = [], calls, failed, itemCount, totalCostUsd } = res.result;
+    const first = proposals.find((p) => p.status !== 'failed') || proposals[0] || null;
+    set({ activeProposal: first });
+    await get().refreshProposals();
+    const cost = typeof totalCostUsd === 'number' ? ` · $${totalCostUsd.toFixed(4)}` : '';
+    if (failed && failed === calls) {
+      get().showToast('error', `All ${calls} page(s) failed — open one to see why.`);
+    } else if (failed) {
+      get().showToast(
+        'error',
+        `${calls - failed} of ${calls} pages read, ${itemCount} row(s) found${cost}. ${failed} failed.`
+      );
+    } else {
+      get().showToast(
+        'success',
+        `Read ${calls} page(s), found ${itemCount} price row(s)${cost} — review and apply`
+      );
     }
     return res;
   },

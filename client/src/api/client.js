@@ -182,6 +182,13 @@ export const adminApi = {
 
   fetchPrices: (body) =>
     request(adminUrl('/prices/fetch'), { method: 'POST', body: JSON.stringify(body) }),
+  // What a company-level fetch would read, and roughly what it would cost — free,
+  // so the dialog can show the price of a click before it is spent.
+  pricePlan: (providerSlug) => request(adminUrl(`/prices/plan${qs({ providerSlug })}`)),
+  // Reads every page a company's prices are spread across (one for most vendors,
+  // several for Kimi and Qwen). Returns one proposal per page.
+  fetchPricesBatch: (body) =>
+    request(adminUrl('/prices/fetch-batch'), { method: 'POST', body: JSON.stringify(body) }),
   listProposals: (params) => request(adminUrl(`/prices/proposals${qs(params)}`)),
   getProposal: (id) => request(adminUrl(`/prices/proposals/${encodeURIComponent(id)}`)),
   applyProposal: (id, itemIds) =>

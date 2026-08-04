@@ -24,15 +24,20 @@ function sweep(now) {
 }
 
 /**
- * Records one attempt against `key` and reports whether it is still allowed.
+ * Records attempts against `key` and reports whether they are still allowed.
  * Sliding window: at most `max` attempts per `windowMs`.
+ *
+ * `cost` charges for more than one attempt in a single call. A batch price fetch
+ * reads several pages behind one click, and each page is a paid model call, so it
+ * has to reserve all of them up front — charging one and discovering halfway
+ * through that the budget is gone would leave the work half done.
  */
-export function hitLimit(key, { max, windowMs }) {
+export function hitLimit(key, { max, windowMs }, cost = 1) {
   const now = Date.now();
   sweep(now);
   const bucket = buckets.get(key) || { hits: [], expires: now + windowMs };
   bucket.hits = bucket.hits.filter((at) => now - at < windowMs);
-  bucket.hits.push(now);
+  for (let i = 0; i < Math.max(1, cost); i += 1) bucket.hits.push(now);
   bucket.expires = now + windowMs;
   buckets.set(key, bucket);
   const ok = bucket.hits.length <= max;

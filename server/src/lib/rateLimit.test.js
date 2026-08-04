@@ -60,6 +60,51 @@ test('the window slides: attempts outside it no longer count', async () => {
   assert.equal(hitLimit(key, limit).ok, true, 'allowance returns after the window');
 });
 
+// --- cost: a batch reserves every slot it will use, up front
+test('a cost of 3 consumes three slots in one call', () => {
+  const key = unique('cost');
+  const limit = { max: 10, windowMs: 60_000 };
+  const first = hitLimit(key, limit, 3);
+  assert.equal(first.ok, true);
+  assert.equal(first.remaining, 7);
+  assert.equal(hitLimit(key, limit, 3).remaining, 4, 'the second batch charges three more');
+});
+
+test('a batch that exactly fills the allowance is allowed', () => {
+  const key = unique('cost-exact');
+  const limit = { max: 3, windowMs: 60_000 };
+  const filled = hitLimit(key, limit, 3);
+  assert.equal(filled.ok, true);
+  assert.equal(filled.remaining, 0);
+  assert.equal(hitLimit(key, limit).ok, false, 'and nothing is left after it');
+});
+
+test('a batch too big for the remaining allowance is refused whole', () => {
+  const key = unique('cost-over');
+  const limit = { max: 5, windowMs: 60_000 };
+  assert.equal(hitLimit(key, limit, 3).remaining, 2);
+  const refused = hitLimit(key, limit, 4);
+  assert.equal(refused.ok, false, 'four pages will not fit in two slots');
+  assert.equal(refused.remaining, 0, 'remaining never goes negative');
+  assert.ok(refused.retryAfterMs > 0 && refused.retryAfterMs <= 60_000);
+  // The refused reservation still counted its slots, which is the point: an
+  // oversized batch must not leave room for a later small call to slip through
+  // on an allowance the batch had already claimed.
+  const after = hitLimit(key, limit, 1);
+  assert.equal(after.ok, false);
+  assert.equal(after.remaining, 0);
+});
+
+test('cost defaults to 1, and 0 or negative is one slot rather than a free call', () => {
+  const key = unique('cost-default');
+  const limit = { max: 4, windowMs: 60_000 };
+  assert.equal(hitLimit(key, limit).remaining, 3, 'no cost given');
+  assert.equal(hitLimit(key, limit, 1).remaining, 2, 'cost 1 is the same charge');
+  assert.equal(hitLimit(key, limit, 0).remaining, 1, 'cost 0 is not free');
+  assert.equal(hitLimit(key, limit, -5).remaining, 0, 'nor is a negative cost');
+  assert.equal(hitLimit(key, limit, 0).ok, false, 'so cost-0 calls do exhaust the allowance');
+});
+
 test('OTP sends are limited to one per minute per email', () => {
   const email = `${unique('otp')}@example.com`;
   assert.equal(canSendOtp(email).ok, true);

@@ -188,6 +188,17 @@ Nothing is ever written to a model's price without that explicit approval — a 
 number would quietly mis-bill every user of the app. Model *discovery* is the free
 counterpart and involves no AI at all: it just asks the provider which model ids exist.
 
+**Some vendors spread their prices over several pages, and you see the bill first.** Most
+publish one table, so *Fetch prices* on the company is a single read — DeepSeek's one page
+covers both of its models. Kimi publishes a page per model family: four models across three
+pages, two of them sharing a page. Pressing *Fetch prices* there reads all three. Before
+anything is spent, the dialog lists the pages it would read and which models each one covers,
+plus an estimated cost — a real run of Kimi's three pages came to $0.0012 — and you can untick
+any page you don't want. Each page then comes back as its **own** proposal, reviewed and
+applied exactly like the single-page flow above, so one page that failed or read badly doesn't
+hold up the others. Models with no pricing page at all are listed as uncovered rather than
+quietly skipped.
+
 **Which pricing pages this can read** (checked 2026-08-04). A server-side fetch only sees
 the HTML the server sends, so a pricing table drawn by JavaScript in the browser is
 invisible to it:
@@ -200,15 +211,17 @@ invisible to it:
 | DeepSeek | yes | `api-docs.deepseek.com/quick_start/pricing` |
 | Z.ai (GLM) | yes | `docs.z.ai/guides/overview/pricing` |
 | Mistral | yes | `mistral.ai/pricing/api/` |
-| Moonshot (Kimi) | yes, per model | `platform.kimi.ai/docs/pricing/chat-k3.md` and siblings |
+| Moonshot (Kimi) | yes — 3 pages in one click | `platform.kimi.ai/docs/pricing/chat-k3.md` and siblings |
 
 Three things worth knowing if you point this at a different page. Several vendors publish a
 markdown twin of every docs page (just append `.md`), which is cleaner and cheaper to read
 than the rendered HTML — the seeded OpenAI, Anthropic and Kimi URLs use it. The marketing
 pricing page is usually the wrong target: `openai.com/api/pricing` returns 403 to anything
-that isn't a browser, while the docs page serves the same table happily. And Kimi prices
-per model rather than on one page, so those URLs live on the models themselves — use the
-**Prices** button on a model's row instead of the company's *Fetch prices*.
+that isn't a browser, while the docs page serves the same table happily. And when a vendor
+prices per model rather than on one page — Kimi does — the URLs go on the models themselves;
+the company's *Fetch prices* then reads each of those pages in turn, so this is no longer a
+row-by-row chore. The **Prices** button on a model's row is still there for re-reading a
+single page.
 
 ### What the dashboard itself costs
 

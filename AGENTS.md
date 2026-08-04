@@ -143,6 +143,23 @@ private URL (never `/admin` — see the routing rules below).
     Kimi's K3 page, headed `Input (Cache Hit) | Input (Cache Miss) | Output`, otherwise
     yields `in: $0.30` against a real input price of `$3.00` — a tenfold understatement
     that looks entirely plausible in a diff.
+  - **A company's prices may span several pages, so a company-level fetch is planned before
+    it is paid for.** `lib/pricePlan.js#buildFetchPlan` decides which pages one click reads: a
+    company-level `pricingUrl` means ONE call covers every model (DeepSeek — two models, one
+    page), and without one the models are grouped by their own `pricingUrl`, so Kimi's K2.7
+    pair sharing `chat-k27-code.md` costs one call and not two (four models over three pages).
+    `GET /prices/plan` is **free — it calls no model** — and exists so the dialog can state
+    "3 pages, about $0.001–$0.004" *before* the click. That ordering is the point: the cost was
+    asked for up front, so anything that makes computing the plan itself expensive defeats it
+    (keep `pricePlan.js` pure). `POST /prices/fetch-batch` then runs the pages
+    **sequentially**, one proposal per page — parallel requests make us a worse neighbour to
+    the vendor and blur the per-page cost in the ledger. Both routes go through the one shared
+    `runPriceFetch()` page→proposal cycle, so validation, billing and auto-apply cannot drift
+    between them; anything added to one path belongs in there. The batch reserves its whole
+    allowance up front (`hitLimit(key, limit, cost)` takes a cost for exactly this), because a
+    batch that dies half-finished leaves some models priced and others not — worse than
+    refusing. `MAX_BATCH_FETCH` caps pages per click, and `plan.dropped` / `plan.uncovered`
+    must always be surfaced: silent truncation would read as "every model was priced".
   - **Model discovery** (`lib/modelDiscovery.js`) asks a provider's own `/models` endpoint
     which ids it actually serves. It is free, involves no LLM, and the provider is the last
     word, so it — not the price fetcher — is how renamed and retired `apiModel` ids get

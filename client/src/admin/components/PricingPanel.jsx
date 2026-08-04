@@ -30,6 +30,9 @@ const STATUS_TONES = {
   discarded: 'neutral',
 };
 
+/** Shared fallback so a company with no models at all doesn't allocate a Set per render. */
+const NO_URLS = new Set();
+
 /** Pricing URLs are long; the host is enough to recognise one in a table. */
 function hostOf(url) {
   try {
@@ -62,7 +65,10 @@ function HowItWorks() {
           Point a company (or a single model) at its pricing URL and press “Fetch prices”. The server
           downloads the page, the admin LLM pulls the numbers out, and the result lands below as a
           proposal you review row by row. Nothing is written until you approve it — a wrong number
-          would quietly mis-bill every user of that model.
+          would quietly mis-bill every user of that model. Most vendors publish one price table for
+          everything they sell, so a company fetch is a single paid call. A few (Kimi, Qwen) publish
+          a page per model family instead — there one company fetch reads several pages, and the
+          dialog says how many and roughly what it will cost before you commit.
         </p>
         <p>
           <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-white/[0.07] text-[11px] font-semibold text-zinc-200">
@@ -93,9 +99,20 @@ function PricingPagesCard() {
   const stats = useMemo(() => {
     const map = new Map();
     for (const model of models) {
-      const entry = map.get(model.company) || { total: 0, priced: 0, newest: null };
+      const entry = map.get(model.company) || {
+        total: 0,
+        priced: 0,
+        newest: null,
+        modelUrls: new Set(),
+      };
       entry.total += 1;
       if (model.price?.in != null || model.price?.out != null) entry.priced += 1;
+      // A Set because one page can price several models — Kimi's two K2.7 variants
+      // share theirs, and that is one call, not two. Inactive models are left out
+      // of the plan the server builds, so counting their pages would promise a
+      // call that never runs.
+      const modelUrl = model.pricingUrl?.trim();
+      if (model.active && modelUrl) entry.modelUrls.add(modelUrl);
       if (
         model.priceUpdatedAt &&
         (!entry.newest || new Date(model.priceUpdatedAt) > new Date(entry.newest))
@@ -110,7 +127,7 @@ function PricingPagesCard() {
   return (
     <Card
       title="Pricing pages"
-      description="One fetch per company reads its whole price table. Set the pricing URL first — that link is the only thing the extractor is allowed to read."
+      description="One fetch per company covers its whole price list — a single table for most vendors, a page per model for a few. Set the pricing URL first: those links are the only things the extractor is allowed to read."
     >
       <TableWrap>
         <table className="w-full min-w-[52rem] border-collapse">
@@ -126,8 +143,13 @@ function PricingPagesCard() {
           <tbody>
             {providers.map((provider) => {
               const { slug, pricingUrl } = provider;
-              const entry = stats.get(slug) || { total: 0, priced: 0, newest: null };
+              const entry =
+                stats.get(slug) || { total: 0, priced: 0, newest: null, modelUrls: NO_URLS };
               const unpriced = entry.total - entry.priced;
+              const modelPages = entry.modelUrls.size;
+              // No company page doesn't mean no prices to read: Kimi and Qwen publish
+              // one page per model, and a company fetch reads all of them.
+              const canFetch = Boolean(pricingUrl) || modelPages > 0;
               return (
                 <tr key={slug} className="hover:bg-white/[0.02]">
                   <Td>
@@ -153,6 +175,15 @@ function PricingPagesCard() {
                         <ExternalLink size={11} className="shrink-0" />
                         <span className="truncate">{hostOf(pricingUrl)}</span>
                       </a>
+                    ) : modelPages ? (
+                      <div className="flex items-center gap-2">
+                        <Badge tone="info" title={[...entry.modelUrls].join('\n')}>
+                          per model
+                        </Badge>
+                        <span className="text-xs text-zinc-500">
+                          {modelPages} page{modelPages === 1 ? '' : 's'}
+                        </span>
+                      </div>
                     ) : (
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-zinc-600">not set</span>
@@ -187,11 +218,13 @@ function PricingPagesCard() {
                       size="sm"
                       icon={Tags}
                       busy={Boolean(busyMap[`price:${slug}`])}
-                      disabled={!pricingUrl}
+                      disabled={!canFetch}
                       title={
                         pricingUrl
                           ? `Read ${hostOf(pricingUrl)} with the admin LLM`
-                          : 'Add a pricing URL to this company first'
+                          : modelPages
+                            ? `Read ${modelPages} per-model page${modelPages === 1 ? '' : 's'} with the admin LLM — the dialog confirms the count and cost first`
+                            : 'Add a pricing URL to this company, or to one of its models, first'
                       }
                       onClick={() => openPriceFetch({ providerSlug: slug })}
                     >
@@ -243,7 +276,15 @@ function RecentFetchesCard() {
   return (
     <Card
       title="Recent fetches"
-      description="Every extraction run, applied or not. A discarded or failed run leaves prices untouched."
+      description={
+        <>
+          Every extraction run, applied or not. A discarded or failed run leaves prices untouched.
+          <span className="mt-1 block">
+            One row per page read, so a company whose prices span several pages adds several rows
+            from a single click.
+          </span>
+        </>
+      }
       actions={
         <Button size="sm" icon={RefreshCw} busy={loading} onClick={load}>
           Refresh
