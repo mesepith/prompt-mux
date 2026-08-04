@@ -2077,15 +2077,35 @@ router.get(
       if (!entry.firstAt || row.firstAt < entry.firstAt) entry.firstAt = row.firstAt;
     }
 
-    // Chat counts and identities come from separate collections; one query each
-    // rather than per-owner lookups.
-    const [convoCounts, users] = await Promise.all([
+    // Chat counts, identities and the IPs each owner has been seen from. One query
+    // each rather than per-owner lookups.
+    const [convoCounts, users, ipRows] = await Promise.all([
       Conversation.aggregate([
         { $group: { _id: { userId: '$userId', sessionId: '$sessionId' }, chats: { $sum: 1 } } },
       ]),
-      User.find({}).select('email role createdAt').lean(),
+      User.find({}).select('email role createdAt lastIp signupIp lastLoginAt').lean(),
+      Message.aggregate([
+        { $match: { ...window, ip: { $ne: null } } },
+        { $group: { _id: { userId: '$userId', sessionId: '$sessionId', ip: '$ip' }, seen: { $sum: 1 }, lastAt: { $max: '$createdAt' } } },
+        { $sort: { lastAt: -1 } },
+      ]),
     ]);
     const chatsByOwner = new Map(convoCounts.map((c) => [ownerKey(c._id), c.chats]));
+    const MAX_IPS_SHOWN = 10;
+    const ipsByOwner = new Map();
+    for (const row of ipRows) {
+      const key = ownerKey(row._id);
+      if (!ipsByOwner.has(key)) ipsByOwner.set(key, { list: [], total: 0 });
+      const entry = ipsByOwner.get(key);
+      // `total` counts every distinct address; `list` is capped at MAX_IPS_SHOWN,
+      // newest first (the $sort above). Counted before the cap on purpose — an
+      // account used from 40 addresses must not report 10, which is exactly what
+      // deriving the count from the truncated list would do.
+      entry.total += 1;
+      if (entry.list.length < MAX_IPS_SHOWN) {
+        entry.list.push({ ip: row._id.ip, messages: row.seen, lastAt: row.lastAt });
+      }
+    }
     const userById = new Map(users.map((u) => [String(u._id), u]));
 
     const list = [...owners.values()].map((entry) => {
@@ -2115,6 +2135,13 @@ router.get(
               ? 'The account has been deleted; its messages and their cost remain.'
               : null,
         chats: chatsByOwner.get(entry.key) || 0,
+        // Where this person's messages came from. `ips` is capped for display;
+        // `ipCount` is the true number of distinct addresses.
+        ips: ipsByOwner.get(entry.key)?.list || [],
+        ipCount: ipsByOwner.get(entry.key)?.total || 0,
+        lastIp: user?.lastIp || ipsByOwner.get(entry.key)?.list?.[0]?.ip || null,
+        signupIp: user?.signupIp || null,
+        lastLoginAt: user?.lastLoginAt || null,
         firstActivityAt: entry.firstAt,
         lastActivityAt: entry.lastAt,
         ...totals,
@@ -2211,6 +2238,8 @@ router.get(
         shared: Boolean(c.shared),
         createdAt: c.createdAt,
         lastMessageAt: c.lastMessageAt,
+        ip: c.ip || null,
+        lastIp: c.lastIp || null,
         messageCount: totalByConvo.get(String(c._id)) || 0,
         // Fork lineage — "parent chat". The title is resolved when the parent
         // belongs to the same owner; a fork of someone else's shared chat keeps
@@ -2256,6 +2285,7 @@ router.get(
         role: m.role,
         createdAt: m.createdAt,
         modelId: m.modelId || null,
+        ip: m.ip || null,
         // Enough to recognise the turn without dumping whole conversations into
         // an admin's browser — this page is about cost, not content.
         preview: (m.content || '').replace(/\s+/g, ' ').trim().slice(0, 160),
@@ -2286,6 +2316,8 @@ router.get(
         lastMessageAt: conversation.lastMessageAt,
         ownerKey: ownerKey(conversation),
         ownerEmail: owner?.email || null,
+        ip: conversation.ip || null,
+        lastIp: conversation.lastIp || null,
         forkedFrom: conversation.forkedFrom || null,
         forkedFromTitle: parent?.title || null,
         forkedFromOwnerKey: parent ? ownerKey(parent) : null,

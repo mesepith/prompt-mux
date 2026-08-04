@@ -32,6 +32,7 @@ import {
 } from '../lib/doc.js';
 import { ownerFilter, ownsConversation } from '../middleware/auth.js';
 import { audit } from '../models/AuditLog.js';
+import { clientIp } from '../lib/clientIp.js';
 
 const router = Router();
 
@@ -41,6 +42,27 @@ function ownerId(req) {
   if (req.userId) return { userId: req.userId };
   if (req.sessionId) return { sessionId: req.sessionId };
   return null;
+}
+
+/**
+ * Owner to stamp on a message. Derived from the CONVERSATION, not the request.
+ *
+ * A message's owner is meant to mirror its conversation's (see AGENTS.md), and the
+ * conversation is the authority: it can't exist without one. Taking it from the
+ * request instead means a call that arrives with neither a cookie nor an
+ * X-Session-Id header writes a message with no owner at all — which is how
+ * production ended up with rows that no usage report could attribute to anyone.
+ * Falls back to the request only if a conversation somehow has no owner either.
+ */
+function messageOwner(conversation, req) {
+  // The IP comes from the request even though the owner comes from the
+  // conversation: it describes who sent THIS message, which is the whole point of
+  // recording it per message.
+  const ip = clientIp(req);
+  const base = ip ? { ip } : {};
+  if (conversation?.userId) return { ...base, userId: conversation.userId };
+  if (conversation?.sessionId) return { ...base, sessionId: conversation.sessionId };
+  return { ...base, ...(ownerId(req) || {}) };
 }
 
 // GET /api/conversations — sidebar list, newest first.
@@ -71,9 +93,11 @@ router.post('/', async (req, res, next) => {
     }
     const owner = ownerId(req);
     if (!owner) return res.status(400).json({ error: 'Authentication required' });
+    const ip = clientIp(req);
     const conversation = await Conversation.create({
       modelId,
       ...(visionModelId ? { visionModelId } : {}),
+      ...(ip ? { ip, lastIp: ip } : {}),
       ...owner,
     });
     res.status(201).json(conversation);
@@ -161,11 +185,13 @@ router.post('/:id/fork', async (req, res, next) => {
     const owner = ownerId(req);
     if (!owner) return res.status(400).json({ error: 'Authentication required' });
 
+    const forkIp = clientIp(req);
     const forked = await Conversation.create({
       title: source.title,
       modelId: source.modelId,
       ...(source.visionModelId ? { visionModelId: source.visionModelId } : {}),
       forkedFrom: source._id,
+      ...(forkIp ? { ip: forkIp, lastIp: forkIp } : {}),
       ...owner,
     });
 
@@ -339,7 +365,7 @@ router.post('/:id/artifact-edit', async (req, res, next) => {
       target: label,
       sourceMessageId: sourceMessage._id,
     };
-    const owner = ownerId(req) || {};
+    const owner = messageOwner(conversation, req);
     const userMessage = await Message.create({
       conversationId: conversation._id,
       role: 'user',
@@ -449,7 +475,7 @@ router.post('/:id/messages', async (req, res, next) => {
     if (!model) return res.status(400).json({ error: 'Unknown modelId' });
 
     const text = (content || '').trim();
-    const owner = ownerId(req) || {};
+    const owner = messageOwner(conversation, req);
 
     // Save the user message (images stored as data URLs; PDFs stored as metadata
     // only — their actual reading happens via the vision-model flow below).
@@ -479,6 +505,8 @@ router.post('/:id/messages', async (req, res, next) => {
     if (messageCount === 1)
       conversation.title = (text || pdfAttachments[0]?.name || docAttachments[0]?.name || 'Image chat').slice(0, 60);
     conversation.lastMessageAt = new Date();
+    const senderIp = clientIp(req);
+    if (senderIp) conversation.lastIp = senderIp;
     await conversation.save();
 
     // --- SSE stream ---

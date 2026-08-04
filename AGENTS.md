@@ -177,6 +177,36 @@ private URL (never `/admin` — see the routing rules below).
   maintained in the dashboard's Models tab (by hand or via a reviewed price proposal).
   A model with no price shows tokens only — `toPublicModel` omits `price` unless both rates
   exist, because a half-filled `{ in: null }` would render `NaN` costs.
+- **Every message write records both its owner and its client IP.** Neither can be
+  reconstructed afterwards, so getting them wrong at write time is unrecoverable.
+  - **The owner comes from the conversation, the IP from the request.**
+    `messageOwner(conversation, req)` in `routes/conversations.js` is the only thing that
+    stamps a message. The conversation is the authority — it cannot exist without an owner —
+    while a request may arrive with neither an `auth-token` cookie nor an `X-Session-Id`
+    header, and the previous `ownerId(req) || {}` then wrote a message with **no owner at
+    all**: real tokens, real money, and no usage report able to attribute them to anybody
+    (production held exactly those rows). The IP is still read from the request, because it
+    describes who sent *this* message rather than who owns the chat.
+  - **Read IPs through `lib/clientIp.js#clientIp`, never `X-Forwarded-For` directly** — a
+    client can send that header itself, and Express already picks the correct hop thanks to
+    the `trust proxy` setting (see the auth bullet below). Normalization is the other half:
+    Node reports an IPv4 client on a dual-stack socket as `::ffff:1.2.3.4`, so without
+    collapsing that, one visitor is stored as two addresses and every per-IP grouping lies;
+    `::1` becomes `127.0.0.1` for the same reason. Values are capped at 45 characters (the
+    longest textual IPv6). It is pure and unit-tested (`clientIp.test.js`) — keep it that way.
+  - **Where it lands.** `Message.ip` per message, because a chat can be continued from a
+    different network and attribution follows the request that spent the tokens;
+    `Conversation.ip` + `Conversation.lastIp` (started from vs last written to — a chat that
+    moved between the two is the interesting case); `User.signupIp` / `User.lastIp` /
+    `User.lastLoginAt` as the summary the admin lists show. `AuditLog` already recorded a
+    per-event IP. All three levels of the Usage tab show them: the distinct addresses per
+    person (newest first, capped at 10 with `ipCount` beside it — the signal is "this account
+    came from several networks", not a full address history), the chat's start/last pair (the
+    second only when it differs), and the exact address per message. The vision leg of a
+    message has none of its own: it is a server-side call inside the same request.
+  - An IP is **personal data**. It is stored so an admin can attribute usage and investigate
+    abuse — the same reason `AuditLog` has kept one since the auth work — so it belongs in
+    whatever retention policy covers that collection.
 - **Per-user usage reporting** — `lib/usageReport.js` plus the three `/usage/*` admin routes
   are the dashboard's Usage tab: who spent what, on which chats, in which messages. The
   pricing layer is pure, and `priceOf(modelId) -> { in, out } | null` is *injected* rather
@@ -187,9 +217,9 @@ private URL (never `/admin` — see the routing rules below).
     message's cost is two independently-priced calls summed — which is why
     `messageBreakdown` returns a `chat` leg, a `vision` leg and a total instead of one
     number. Any cost calculation that reads only `usage` understates every image
-    conversation: on the live database `mistral-medium-3.5` appears *twice* in the legacy
-    bucket's `byModel`, $0.0315 as a chat model and $0.0613 as a vision model, and the
-    larger figure is the one a `usage`-only sum drops.
+    conversation: on the live database `mistral-medium-3.5` appeared *twice* in the legacy
+    bucket's `byModel` (before that bucket was cleared — see below), $0.0315 as a chat model
+    and $0.0613 as a vision model, and the larger figure is the one a `usage`-only sum drops.
   - **Reasoning tokens are already inside `outputTokens`** — every provider we talk to
     reports them that way. Carry them for information, never add them to the bill: doing so
     inflates the cost of exactly the reasoning models people reach for.
@@ -207,12 +237,17 @@ private URL (never `/admin` — see the routing rules below).
   - **`ownerKey` is the identity**: `user:<id>`, `session:<id>` or `legacy`. Anonymous
     sessions are deliberately in the report; they spend the owner's money exactly like a
     signed-in account does. `legacy` is chats from before conversations recorded an owner —
-    they carry neither field, there is genuinely nobody to attribute them to, and on the
-    current database they are most of the history (290 of 348 messages, ~96% of spend). The
-    report labels that bucket "Before user accounts existed" and attaches a `note` saying
-    why, because a nameless row holding most of the money otherwise reads as a bug. Listing
-    those chats needs a match on *absence* (`{ userId: { $exists: false }, sessionId: {
-    $exists: false } }`); there is no value to filter on.
+    they carry neither field, so there is genuinely nobody to attribute them to. That bucket
+    *was* most of the history (290 of 348 messages, ~96% of spend); those chats (28–30 July
+    2026) have since been backed up to JSON and deleted from both databases — 55
+    conversations / 290 messages locally, 7 conversations / 14 messages on production, plus 7
+    dangling messages whose conversations were already gone — so in practice it is now empty.
+    **Keep the code path regardless**: the shape can recur (it is what the `messageOwner` rule
+    above prevents, and it happened once), and a report that quietly drops the rows it cannot
+    name understates the bill. The report labels that bucket "Before user accounts existed"
+    and attaches a `note` saying why, because a nameless row holding real money reads as a
+    bug otherwise. Listing those chats needs a match on *absence* (`{ userId: { $exists:
+    false }, sessionId: { $exists: false } }`); there is no value to filter on.
 
   The honest limitation: **this is a cost report, not an invoice.** Messages don't store the
   price they were billed at, so every figure uses *today's* registry rates and a price
@@ -280,7 +315,8 @@ private URL (never `/admin` — see the routing rules below).
     names to the `AuditLog` enum or the write is silently rejected).
   - Sign-up is gated by `config/access.js#isRegistrationAllowed` (`ALLOWED_EMAILS`).
   - `app.set('trust proxy', 'loopback')` in `index.js` is what makes `req.ip` real behind
-    nginx; without it every per-IP limit is global and every audit row says `127.0.0.1`.
+    nginx; without it every per-IP limit is global, and every audit row — plus every IP stored
+    on a user, conversation or message — says `127.0.0.1`.
   - Unknown-email answers are deliberately consistent across `/forgot-password`, `/resend`
     and `/reset-password` (404 + `noAccount: true`). Don't "fix" one of them back to a fake
     200: `/register` already reveals existence via 409, and the fake success is what sent

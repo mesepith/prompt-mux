@@ -18,6 +18,11 @@ const conversationSchema = new mongoose.Schema(
     sharedAt: { type: Date },
     // Optional lineage for conversations created by forking a shared chat.
     forkedFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'Conversation', sparse: true, index: true },
+    // Where the chat was started, and where it was last written to. Both kept:
+    // the first answers "who created this", the second "is it still the same
+    // network", and a chat that moves between them is worth being able to see.
+    ip: { type: String, default: null, index: true },
+    lastIp: { type: String, default: null },
   },
   { timestamps: true }
 );

@@ -174,6 +174,43 @@ function TokenTiles({ totals }) {
 }
 
 /** Token columns, in the same order at every level. */
+/**
+ * Where a person's messages came from. One address is the ordinary case; several
+ * is the interesting one (a shared account, or one person on several networks), so
+ * the count leads and the rest are in the tooltip.
+ */
+function IpCell({ ips, count, fallback }) {
+  const list = Array.isArray(ips) ? ips : [];
+  // `count` is the true number of distinct addresses; `list` is capped for display,
+  // so "+N more" must come from the count or it silently saturates.
+  const total = typeof count === 'number' && count > list.length ? count : list.length;
+  if (!list.length) {
+    return (
+      <Td className="align-top whitespace-nowrap font-mono text-[11px] text-zinc-500">
+        {fallback ? (
+          <span title="From the account's last sign-in; these messages predate per-message IP recording.">
+            {fallback}
+          </span>
+        ) : (
+          <span title="Recorded only for messages sent after IP logging was added.">—</span>
+        )}
+      </Td>
+    );
+  }
+  const [first] = list;
+  const hidden = total - 1;
+  return (
+    <Td className="align-top whitespace-nowrap font-mono text-[11px] text-zinc-300">
+      <span title={list.map((i) => `${i.ip} · ${i.messages} message(s)`).join('\n')}>
+        {first.ip}
+        {hidden > 0 && (
+          <span className="ml-1 font-sans text-[10.5px] text-amber-300">+{hidden} more</span>
+        )}
+      </span>
+    </Td>
+  );
+}
+
 function TokenCells({ input, output, reasoning, total }) {
   return (
     <>
@@ -293,13 +330,14 @@ function PeopleLevel({ usage, onOpen }) {
                 <Th align="right">Reasoning</Th>
                 <Th align="right">Total tokens</Th>
                 <Th align="right">Cost</Th>
+                <Th>IP</Th>
                 <Th>Last active</Th>
                 <Th />
               </tr>
             </thead>
             <tbody>
               {users.length === 0 ? (
-                <EmptyRow colSpan={9}>
+                <EmptyRow colSpan={10}>
                   {windowed
                     ? 'No messages were billed in these dates.'
                     : 'Nothing has been billed yet.'}
@@ -343,6 +381,7 @@ function PeopleLevel({ usage, onOpen }) {
                     <Td align="right" className="align-top tabular-nums font-medium text-zinc-100">
                       {money(row.costUsd)}
                     </Td>
+                    <IpCell ips={row.ips} count={row.ipCount} fallback={row.lastIp} />
                     <Td className="align-top whitespace-nowrap text-zinc-400">
                       <span title={fullDate(row.lastActivityAt)}>{timeAgo(row.lastActivityAt)}</span>
                     </Td>
@@ -416,6 +455,7 @@ function ChatsLevel({ owner, ownerKey, chatsRes, windowed, onOpen }) {
                 <Th align="right">Total</Th>
                 <Th align="right">Cost</Th>
                 <Th>Parent chat</Th>
+                <Th>IP</Th>
                 <Th>Started</Th>
                 <Th>Last message</Th>
                 <Th />
@@ -423,7 +463,7 @@ function ChatsLevel({ owner, ownerKey, chatsRes, windowed, onOpen }) {
             </thead>
             <tbody>
               {chats.length === 0 ? (
-                <EmptyRow colSpan={11}>This owner has no chats.</EmptyRow>
+                <EmptyRow colSpan={12}>This owner has no chats.</EmptyRow>
               ) : (
                 chats.map((chat) => (
                   <tr
@@ -488,6 +528,27 @@ function ChatsLevel({ owner, ownerKey, chatsRes, windowed, onOpen }) {
                         </span>
                       ) : (
                         <Dash />
+                      )}
+                    </Td>
+                    {/* Both addresses, but only when they differ — a chat that moved
+                        network is worth noticing; one that didn't is just noise. */}
+                    <Td className="align-top whitespace-nowrap font-mono text-[11px] text-zinc-300">
+                      {chat.ip || chat.lastIp ? (
+                        <>
+                          <span>{chat.ip || chat.lastIp}</span>
+                          {chat.lastIp && chat.ip && chat.lastIp !== chat.ip && (
+                            <span
+                              className="ml-1 font-sans text-[10.5px] text-amber-300"
+                              title={`Started from ${chat.ip}, last written from ${chat.lastIp}`}
+                            >
+                              → {chat.lastIp}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-zinc-500" title="Recorded only for chats started after IP logging was added.">
+                          —
+                        </span>
                       )}
                     </Td>
                     <Td className="align-top whitespace-nowrap text-zinc-400">
@@ -558,6 +619,9 @@ function MessageRows({ message }) {
     <>
       <tr className="align-top">
         <Td className="whitespace-nowrap align-top text-zinc-400">{fullDate(message.createdAt)}</Td>
+        <Td className="whitespace-nowrap align-top font-mono text-[11px] text-zinc-400">
+          {message.ip || <span className="text-zinc-600">—</span>}
+        </Td>
         <Td className="align-top">
           <div className="flex flex-wrap items-center gap-1.5">
             <Badge tone={ROLE_TONES[message.role] || 'neutral'}>{message.role}</Badge>
@@ -626,6 +690,9 @@ function MessageRows({ message }) {
 
       {message.vision && (
         <tr className="bg-white/[0.02] align-top">
+          <Td />
+          {/* Second spacer for the IP column: the vision call was made by the
+              server as part of the same request, so it has no IP of its own. */}
           <Td />
           <Td className="align-top">
             <span className="ml-3 inline-flex items-center gap-1.5 text-[11px] text-zinc-500">
@@ -742,6 +809,7 @@ function MessagesLevel({ chatRes }) {
             <thead>
               <tr>
                 <Th>When</Th>
+                <Th>IP</Th>
                 <Th>Role</Th>
                 <Th>Model</Th>
                 <Th align="right">Input</Th>
@@ -752,7 +820,7 @@ function MessagesLevel({ chatRes }) {
             </thead>
             <tbody>
               {messages.length === 0 ? (
-                <EmptyRow colSpan={7}>This chat has no messages.</EmptyRow>
+                <EmptyRow colSpan={8}>This chat has no messages.</EmptyRow>
               ) : (
                 messages.map((message) => <MessageRows key={message._id} message={message} />)
               )}

@@ -20,6 +20,7 @@ import { adminPathSegment } from '../config/adminPath.js';
 import { mergeAnonymousSession } from '../lib/sessionMerge.js';
 import { Message } from '../models/Message.js';
 import { audit } from '../models/AuditLog.js';
+import { clientIp } from '../lib/clientIp.js';
 
 const router = Router();
 
@@ -41,6 +42,17 @@ function publicUser(user) {
     role: user.role || 'user',
     createdAt: user.createdAt,
   };
+}
+
+/**
+ * Records where and when an account was last signed in from. Fire-and-forget: a
+ * failed bookkeeping write must never block a successful login.
+ */
+function touchLastSeen(user, req) {
+  const ip = clientIp(req);
+  User.updateOne({ _id: user._id }, { $set: { lastIp: ip, lastLoginAt: new Date() } }).catch(
+    (err) => console.error('[auth] could not record last-seen:', err.message)
+  );
 }
 
 /**
@@ -189,7 +201,12 @@ router.post('/register', async (req, res, next) => {
     }
 
     const passwordHash = await hashPassword(password);
-    const user = await User.create({ email: normalized, passwordHash, verified: false });
+    const user = await User.create({
+      email: normalized,
+      passwordHash,
+      verified: false,
+      signupIp: clientIp(req),
+    });
 
     try {
       await sendOrReuseRegisterOtp({
@@ -254,6 +271,7 @@ router.post('/verify-email', async (req, res, next) => {
     setAuthCookie(res, token);
     audit({ event: 'email_verified', userId: user._id, email: user.email, sessionId, req });
     await applyBootstrapAdmin(user, req);
+    touchLastSeen(user, req);
 
     res.json(authPayload(user));
   } catch (err) {
@@ -335,6 +353,7 @@ router.post('/login', async (req, res, next) => {
     clearLimit(`login:${normalized}`); // a success shouldn't leave the account throttled
     audit({ event: 'user_login', userId: user._id, email: user.email, sessionId, req });
     await applyBootstrapAdmin(user, req);
+    touchLastSeen(user, req);
 
     res.json(authPayload(user));
   } catch (err) {
@@ -445,6 +464,7 @@ router.post('/reset-password', async (req, res, next) => {
     setAuthCookie(res, token);
     audit({ event: 'password_reset', userId: user._id, email: user.email, sessionId, req });
     await applyBootstrapAdmin(user, req);
+    touchLastSeen(user, req);
 
     res.json(authPayload(user));
   } catch (err) {

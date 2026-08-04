@@ -56,6 +56,11 @@ const messageSchema = new mongoose.Schema(
     // Ownership. Mirrors the parent conversation's owner.
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', sparse: true, index: true },
     sessionId: { type: String, sparse: true, index: true },
+    // Where the request came from, normalized by lib/clientIp.js. Recorded per
+    // message rather than only per conversation because a chat can be continued
+    // from a different network, and attribution follows the request that spent
+    // the tokens. Personal data — see the note in lib/clientIp.js.
+    ip: { type: String, default: null, index: true },
   },
   { timestamps: true }
 );

@@ -16,6 +16,12 @@ const userSchema = new mongoose.Schema(
     // Bootstrap the first one with ADMIN_EMAILS in server/.env (see
     // config/access.js#isBootstrapAdmin) or `npm --prefix server run make-admin`.
     role: { type: String, enum: ['user', 'admin'], default: 'user', index: true },
+    // Where the account was created, and where it was last signed in from.
+    // Stored for abuse investigation and usage attribution; AuditLog already keeps
+    // a per-event history, these two are the summary the admin lists show.
+    signupIp: { type: String, default: null },
+    lastIp: { type: String, default: null },
+    lastLoginAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

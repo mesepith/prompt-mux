@@ -230,17 +230,20 @@ single page.
 **Usage** answers "where did the bill go?" one person at a time. It opens on a list of
 everyone who has sent a message — signed-in accounts by email, anonymous visitors as
 *Anonymous · 50c13588*, since somebody who never signed up still spends your credits. Each
-row shows how many chats they have, when they first and last used the app, their input /
-output / reasoning tokens, and the estimated cost, biggest spender first.
+row shows how many chats they have, when they first and last used the app, the addresses
+their messages came from (with a *+N more* when one account has been used from several
+networks), their input / output / reasoning tokens, and the estimated cost, biggest spender
+first.
 
-From there you drill down: a person → their chats (title, model, when it started and was
-last used, message count, and the **parent chat** when it was forked from a shared link) →
-one chat's messages, each with its preview, attachments, tokens and cost. A message that
-needed a separate **image model** shows *both* billed calls — the vision model that read the
-picture and the chat model that wrote the reply — because together they are what the message
-really cost, and counting only the reply understates every image conversation. Reasoning
-tokens are listed for information: providers report them inside the output tokens, so they
-are never charged twice.
+From there you drill down: a person → their chats (title, model, when it started and was last
+used, message count, the address it was started from and — when they differ — the one it was
+last written from, and the **parent chat** when it was forked from a shared link) → one chat's
+messages, each with its preview, attachments, the address it was sent from, tokens and cost. A
+message that needed a separate **image model** shows *both* billed calls — the vision model
+that read the picture and the chat model that wrote the reply — because together they are what
+the message really cost, and counting only the reply understates every image conversation.
+Reasoning tokens are listed for information: providers report them inside the output tokens,
+so they are never charged twice.
 
 Two things to keep in mind. Costs are computed at **today's** prices from the model
 registry, not the price that was in force when the message was sent — messages don't store a
@@ -250,6 +253,11 @@ flagged as a floor instead of quietly counting the model as free. Chats created 
 PromptMux recorded who owned a conversation are grouped under **"Before user accounts
 existed"**, with a note explaining that they can't be attributed to anyone — on an install
 that has been running a while, that bucket can hold most of the history.
+
+The addresses those columns show are recorded on sign-up, on sign-in, and on every chat and
+message, so that usage can be attributed and a shared or abused account is visible — the same
+reason logins are written to the audit log. They are personal data: keep them in whatever
+retention and privacy policy covers your logs.
 
 ### What the dashboard itself costs
 
