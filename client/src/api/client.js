@@ -199,6 +199,12 @@ export const adminApi = {
   discardProposal: (id) =>
     request(adminUrl(`/prices/proposals/${encodeURIComponent(id)}/discard`), { method: 'POST' }),
 
+  // Usage reporting: who spent what, drilled from people -> chats -> messages.
+  usageUsers: (params) => request(adminUrl(`/usage/users${qs(params)}`)),
+  usageUserChats: (ownerKey, params) =>
+    request(adminUrl(`/usage/users/${encodeURIComponent(ownerKey)}/chats${qs(params)}`)),
+  usageChat: (id) => request(adminUrl(`/usage/chats/${encodeURIComponent(id)}`)),
+
   getSettings: () => request(adminUrl('/settings')),
   updateSettings: (patch) =>
     request(adminUrl('/settings'), { method: 'PATCH', body: JSON.stringify(patch) }),

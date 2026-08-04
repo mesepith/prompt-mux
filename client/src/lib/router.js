@@ -16,7 +16,15 @@
 const CHAT_PREFIX = '/c/';
 const OBJECT_ID = /^[a-f\d]{24}$/i;
 
-export const ADMIN_TABS = ['overview', 'providers', 'models', 'pricing', 'settings', 'activity'];
+export const ADMIN_TABS = [
+  'overview',
+  'providers',
+  'models',
+  'pricing',
+  'usage',
+  'settings',
+  'activity',
+];
 
 let adminSegment = null;
 

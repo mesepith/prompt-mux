@@ -14,8 +14,8 @@ live previews.
   no redeploy — see **Admin dashboard** below).
 - **Admin dashboard** — a `/admin` area for the owner: add companies and models, set each
   model's input/output price, switch models on and off, paste API keys (encrypted in the
-  database), pull the latest prices off a provider's pricing page for review, and see the
-  last 30 days of spend per model.
+  database), pull the latest prices off a provider's pricing page for review, see the
+  last 30 days of spend per model, and break tokens and cost down per user, chat and message.
 - **Switch models mid-conversation** — pick a different model for any message; every
   reply is badged with the model that wrote it. Full history is preserved per chat.
 - **Live artifacts** — ask for a website, game, dashboard or component and the model's
@@ -142,6 +142,8 @@ source files, no restart:
   deactivate models to control what appears in the model picker; existing chats that used a
   deactivated model still open and say so.
 - **Pricing** — fetch prices from a provider's pricing page and review them (below).
+- **Usage** — who spent what: tokens and estimated cost per user, drillable down to each of
+  their chats and each individual message (below).
 - **Settings** — which model to use for reading pricing pages, how much of a page to read,
   and whether fetched prices need approval.
 - **Overview / Activity** — a health panel (missing keys, unpriced models, whether key
@@ -222,6 +224,32 @@ prices per model rather than on one page — Kimi does — the URLs go on the mo
 the company's *Fetch prices* then reads each of those pages in turn, so this is no longer a
 row-by-row chore. The **Prices** button on a model's row is still there for re-reading a
 single page.
+
+### Who spent what (Usage tab)
+
+**Usage** answers "where did the bill go?" one person at a time. It opens on a list of
+everyone who has sent a message — signed-in accounts by email, anonymous visitors as
+*Anonymous · 50c13588*, since somebody who never signed up still spends your credits. Each
+row shows how many chats they have, when they first and last used the app, their input /
+output / reasoning tokens, and the estimated cost, biggest spender first.
+
+From there you drill down: a person → their chats (title, model, when it started and was
+last used, message count, and the **parent chat** when it was forked from a shared link) →
+one chat's messages, each with its preview, attachments, tokens and cost. A message that
+needed a separate **image model** shows *both* billed calls — the vision model that read the
+picture and the chat model that wrote the reply — because together they are what the message
+really cost, and counting only the reply understates every image conversation. Reasoning
+tokens are listed for information: providers report them inside the output tokens, so they
+are never charged twice.
+
+Two things to keep in mind. Costs are computed at **today's** prices from the model
+registry, not the price that was in force when the message was sent — messages don't store a
+rate — so this is a cost report rather than an invoice, and each view says when it was
+priced. And a model with no price contributes its tokens but no cost, so such a total is
+flagged as a floor instead of quietly counting the model as free. Chats created before
+PromptMux recorded who owned a conversation are grouped under **"Before user accounts
+existed"**, with a note explaining that they can't be attributed to anyone — on an install
+that has been running a while, that bucket can hold most of the history.
 
 ### What the dashboard itself costs
 

@@ -5,6 +5,7 @@ import {
   Building2,
   Cpu,
   Gauge,
+  Receipt,
   Loader2,
   RefreshCw,
   Settings as SettingsIcon,
@@ -21,6 +22,7 @@ import OverviewPanel from './components/OverviewPanel.jsx';
 import ProvidersPanel from './components/ProvidersPanel.jsx';
 import ModelsPanel from './components/ModelsPanel.jsx';
 import PricingPanel from './components/PricingPanel.jsx';
+import UsagePanel from './components/UsagePanel.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import ActivityPanel from './components/ActivityPanel.jsx';
 import ProviderEditor from './components/ProviderEditor.jsx';
@@ -44,6 +46,7 @@ const TABS = [
   { id: 'providers', label: 'Companies', icon: Building2 },
   { id: 'models', label: 'Models', icon: Cpu },
   { id: 'pricing', label: 'Pricing', icon: Tags },
+  { id: 'usage', label: 'Usage', icon: Receipt },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
   { id: 'activity', label: 'Activity', icon: Activity },
 ];
@@ -53,6 +56,7 @@ const PANELS = {
   providers: ProvidersPanel,
   models: ModelsPanel,
   pricing: PricingPanel,
+  usage: UsagePanel,
   settings: SettingsPanel,
   activity: ActivityPanel,
 };

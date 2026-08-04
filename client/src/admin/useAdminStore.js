@@ -42,6 +42,13 @@ export const useAdminStore = create((set, get) => ({
   priceFetchTarget: null, // { providerSlug, modelSlug?, url }
   fetchPlan: null, // pages a company-level fetch would read + cost estimate
   fetchPlanLoading: false,
+  // Usage reporting drill-down: people -> their chats -> one chat's messages.
+  // Each level is fetched on demand; `usageLevel` is what the panel renders.
+  usage: null, // GET /usage/users response
+  usageOwner: null, // GET /usage/users/:ownerKey/chats response
+  usageChat: null, // GET /usage/chats/:id response
+  usageWindow: { from: '', to: '' },
+  usageLoading: false,
 
   // ---------- helpers ----------
   isBusy: (key) => Boolean(get().busy[key]),
@@ -172,6 +179,54 @@ export const useAdminStore = create((set, get) => ({
     const res = await adminApi.listProposals({ providerSlug, limit: 25 });
     set({ proposals: res.proposals });
   },
+
+  // ---------- usage reporting ----------
+  setUsageWindow: (usageWindow) => set({ usageWindow }),
+
+  loadUsage: async () => {
+    const { from, to } = get().usageWindow;
+    set({ usageLoading: true });
+    try {
+      const usage = await adminApi.usageUsers({ from, to });
+      set({ usage, usageLoading: false });
+      return usage;
+    } catch (err) {
+      set({ usageLoading: false });
+      get().showToast('error', err.message);
+      return null;
+    }
+  },
+
+  openUsageOwner: async (ownerKey) => {
+    const { from, to } = get().usageWindow;
+    set({ usageLoading: true, usageChat: null });
+    try {
+      const usageOwner = await adminApi.usageUserChats(ownerKey, { from, to });
+      set({ usageOwner, usageLoading: false });
+      return usageOwner;
+    } catch (err) {
+      set({ usageLoading: false });
+      get().showToast('error', err.message);
+      return null;
+    }
+  },
+
+  openUsageChat: async (id) => {
+    set({ usageLoading: true });
+    try {
+      const usageChat = await adminApi.usageChat(id);
+      set({ usageChat, usageLoading: false });
+      return usageChat;
+    } catch (err) {
+      set({ usageLoading: false });
+      get().showToast('error', err.message);
+      return null;
+    }
+  },
+
+  // Breadcrumb navigation: closing a level returns to the one above it.
+  closeUsageChat: () => set({ usageChat: null }),
+  closeUsageOwner: () => set({ usageOwner: null, usageChat: null }),
 
   refreshAudit: async () => {
     const res = await adminApi.audit({ limit: 100 });

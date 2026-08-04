@@ -177,6 +177,48 @@ private URL (never `/admin` — see the routing rules below).
   maintained in the dashboard's Models tab (by hand or via a reviewed price proposal).
   A model with no price shows tokens only — `toPublicModel` omits `price` unless both rates
   exist, because a half-filled `{ in: null }` would render `NaN` costs.
+- **Per-user usage reporting** — `lib/usageReport.js` plus the three `/usage/*` admin routes
+  are the dashboard's Usage tab: who spent what, on which chats, in which messages. The
+  pricing layer is pure, and `priceOf(modelId) -> { in, out } | null` is *injected* rather
+  than imported from the registry, so the arithmetic is testable without booting a registry
+  or a database. Six things it gets right on purpose:
+  - **One message can bill two models.** `Message.usage` is the reply model; `visionUsage`
+    is the separate vision model from the two-model image flow. Different prices, so a
+    message's cost is two independently-priced calls summed — which is why
+    `messageBreakdown` returns a `chat` leg, a `vision` leg and a total instead of one
+    number. Any cost calculation that reads only `usage` understates every image
+    conversation: on the live database `mistral-medium-3.5` appears *twice* in the legacy
+    bucket's `byModel`, $0.0315 as a chat model and $0.0613 as a vision model, and the
+    larger figure is the one a `usage`-only sum drops.
+  - **Reasoning tokens are already inside `outputTokens`** — every provider we talk to
+    reports them that way. Carry them for information, never add them to the bill: doing so
+    inflates the cost of exactly the reasoning models people reach for.
+  - **`costUsd: null` means "unknown", `0` means "free"**, and collapsing the two is how an
+    unpriced model quietly reads as free and a partial total reads as the answer.
+    `costOfCall` returns null, and `rollUp` also reports `unpricedModels` and `fullyPriced`
+    so the UI can label a total as a floor.
+  - **`rollUp`'s `messages` counts only `kind: 'chat'` rows.** The vision leg of a message
+    is not another message. Tokens and cost sum over both kinds; the count must not.
+  - **Aggregate in Mongo, price in JS.** The routes `$group` tokens by owner / chat / model
+    (two passes, because `usage` and `visionUsage` are different fields, each tagged with
+    `kind`) and hand the groups to `rollUp`. Prices can't be joined in — they live in the
+    in-process registry cache, so no `$lookup` can reach them — and pulling every message
+    into Node to price it there stops scaling the moment the history is real.
+  - **`ownerKey` is the identity**: `user:<id>`, `session:<id>` or `legacy`. Anonymous
+    sessions are deliberately in the report; they spend the owner's money exactly like a
+    signed-in account does. `legacy` is chats from before conversations recorded an owner —
+    they carry neither field, there is genuinely nobody to attribute them to, and on the
+    current database they are most of the history (290 of 348 messages, ~96% of spend). The
+    report labels that bucket "Before user accounts existed" and attaches a `note` saying
+    why, because a nameless row holding most of the money otherwise reads as a bug. Listing
+    those chats needs a match on *absence* (`{ userId: { $exists: false }, sessionId: {
+    $exists: false } }`); there is no value to filter on.
+
+  The honest limitation: **this is a cost report, not an invoice.** Messages don't store the
+  price they were billed at, so every figure uses *today's* registry rates and a price
+  edited yesterday silently re-prices last month. Every response returns `pricedAt` so the
+  UI can state that, and it must. Back-dating each message against `LlmModel.priceHistory`
+  is a possible future change, not what this does.
 - **Chat transport is SSE** over `POST /api/conversations/:id/messages` with event
   types `start | token | done | error`. The client parses it in
   `client/src/api/client.js#streamMessage`. Keep event shapes in sync on both sides.

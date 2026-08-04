@@ -51,6 +51,12 @@ import {
 import { hitLimit } from '../lib/rateLimit.js';
 import { adminPathSegment, updateAdminPath } from '../config/adminPath.js';
 import { buildFetchPlan, estimatePlanCost } from '../lib/pricePlan.js';
+import {
+  messageBreakdown,
+  rollUp,
+  ownerKey,
+  parseOwnerKey,
+} from '../lib/usageReport.js';
 import { fetchTextUrl } from '../lib/fetchUrl.js';
 import { htmlToText, stripMdxArtifacts } from '../lib/htmlText.js';
 import {
@@ -1977,6 +1983,326 @@ router.post(
       itemCount: proposal.items.length,
     });
     res.json({ proposal: proposalResponse(proposal) });
+  })
+);
+
+// --- usage reporting ----------------------------------------------------
+
+/**
+ * Per-user, per-chat, per-message token and cost reporting.
+ *
+ * Costs are priced at TODAY'S registry rates, not at the rate in force when the
+ * message was sent — messages don't store a price and back-dating against
+ * `priceHistory` would be a different (and much bigger) feature. Every response
+ * says so via `pricedAt` so the number is never mistaken for an invoice.
+ *
+ * Anonymous traffic is included: a `session:<id>` owner spends the owner's money
+ * exactly like a signed-in user does, and leaving it out would under-report.
+ */
+const priceOf = (modelId) => getModel(modelId)?.price || null;
+
+/** Parses ?from/?to into a createdAt filter. Both optional, both inclusive-ish. */
+function dateWindow(query) {
+  const range = {};
+  const from = query.from ? new Date(query.from) : null;
+  const to = query.to ? new Date(query.to) : null;
+  if (from && !Number.isNaN(from.getTime())) range.$gte = from;
+  if (to && !Number.isNaN(to.getTime())) range.$lte = to;
+  return Object.keys(range).length ? { createdAt: range } : {};
+}
+
+/**
+ * Groups assistant-message usage by owner and model, for BOTH the reply model and
+ * the vision model. Two passes because they live on different fields; tagging each
+ * row with `kind` keeps the message count from being double-counted (a message with
+ * a vision leg is still one message).
+ */
+async function usageByOwner(match) {
+  const base = { ...match, role: 'assistant' };
+  const [chat, vision] = await Promise.all([
+    Message.aggregate([
+      { $match: { ...base, 'usage.inputTokens': { $exists: true } } },
+      {
+        $group: {
+          _id: { userId: '$userId', sessionId: '$sessionId', modelId: '$modelId' },
+          messages: { $sum: 1 },
+          inputTokens: { $sum: { $ifNull: ['$usage.inputTokens', 0] } },
+          outputTokens: { $sum: { $ifNull: ['$usage.outputTokens', 0] } },
+          reasoningTokens: { $sum: { $ifNull: ['$usage.reasoningTokens', 0] } },
+          totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+          lastAt: { $max: '$createdAt' },
+          firstAt: { $min: '$createdAt' },
+        },
+      },
+    ]),
+    Message.aggregate([
+      { $match: { ...base, 'visionUsage.modelId': { $ne: null } } },
+      {
+        $group: {
+          _id: { userId: '$userId', sessionId: '$sessionId', modelId: '$visionUsage.modelId' },
+          messages: { $sum: 1 },
+          inputTokens: { $sum: { $ifNull: ['$visionUsage.inputTokens', 0] } },
+          outputTokens: { $sum: { $ifNull: ['$visionUsage.outputTokens', 0] } },
+          reasoningTokens: { $sum: 0 },
+          totalTokens: { $sum: { $ifNull: ['$visionUsage.totalTokens', 0] } },
+          lastAt: { $max: '$createdAt' },
+          firstAt: { $min: '$createdAt' },
+        },
+      },
+    ]),
+  ]);
+  return [
+    ...chat.map((r) => ({ ...r, kind: 'chat' })),
+    ...vision.map((r) => ({ ...r, kind: 'vision' })),
+  ];
+}
+
+/**
+ * GET /usage/users — one row per person (or anonymous session) with every token
+ * type and the cost, newest activity first.
+ */
+router.get(
+  '/usage/users',
+  route(async (req, res) => {
+    const window = dateWindow(req.query);
+    const rows = await usageByOwner(window);
+
+    const owners = new Map();
+    for (const row of rows) {
+      const key = ownerKey(row._id);
+      if (!owners.has(key)) owners.set(key, { key, groups: [], lastAt: null, firstAt: null });
+      const entry = owners.get(key);
+      entry.groups.push({ ...row, modelId: row._id.modelId });
+      if (!entry.lastAt || row.lastAt > entry.lastAt) entry.lastAt = row.lastAt;
+      if (!entry.firstAt || row.firstAt < entry.firstAt) entry.firstAt = row.firstAt;
+    }
+
+    // Chat counts and identities come from separate collections; one query each
+    // rather than per-owner lookups.
+    const [convoCounts, users] = await Promise.all([
+      Conversation.aggregate([
+        { $group: { _id: { userId: '$userId', sessionId: '$sessionId' }, chats: { $sum: 1 } } },
+      ]),
+      User.find({}).select('email role createdAt').lean(),
+    ]);
+    const chatsByOwner = new Map(convoCounts.map((c) => [ownerKey(c._id), c.chats]));
+    const userById = new Map(users.map((u) => [String(u._id), u]));
+
+    const list = [...owners.values()].map((entry) => {
+      const parsed = parseOwnerKey(entry.key);
+      const user = parsed?.kind === 'user' ? userById.get(parsed.userId) : null;
+      const totals = rollUp(entry.groups, priceOf);
+      return {
+        ownerKey: entry.key,
+        kind: parsed?.kind || 'unknown',
+        email: user?.email || null,
+        role: user?.role || null,
+        // An anonymous session has no name; show enough of the id to tell two apart.
+        label:
+          user?.email ||
+          (parsed?.kind === 'session'
+            ? `Anonymous · ${parsed.sessionId.slice(0, 8)}`
+            : parsed?.kind === 'legacy'
+              ? 'Before user accounts existed'
+              : 'Deleted account'),
+        // Says why a row has no name, so an admin doesn't read it as a bug. The
+        // legacy bucket predates per-user ownership; a `user:` key with no User
+        // row means the account was deleted but its messages remain.
+        note:
+          parsed?.kind === 'legacy'
+            ? 'These chats were created before PromptMux recorded who owned a conversation, so they cannot be attributed to anyone.'
+            : parsed?.kind === 'user' && !user
+              ? 'The account has been deleted; its messages and their cost remain.'
+              : null,
+        chats: chatsByOwner.get(entry.key) || 0,
+        firstActivityAt: entry.firstAt,
+        lastActivityAt: entry.lastAt,
+        ...totals,
+      };
+    });
+
+    list.sort((a, b) => (b.costUsd || 0) - (a.costUsd || 0) || b.totalTokens - a.totalTokens);
+
+    res.json({
+      users: list,
+      totals: rollUp(rows.map((r) => ({ ...r, modelId: r._id.modelId })), priceOf),
+      pricedAt: new Date(),
+      window: { from: req.query.from || null, to: req.query.to || null },
+    });
+  })
+);
+
+/**
+ * GET /usage/users/:ownerKey/chats — every conversation that owner has, with its
+ * own token and cost rollup and its fork lineage.
+ */
+router.get(
+  '/usage/users/:ownerKey/chats',
+  route(async (req, res) => {
+    const parsed = parseOwnerKey(req.params.ownerKey);
+    if (!parsed) throw badRequest('ownerKey must look like "user:<id>", "session:<id>" or "legacy".');
+    if (parsed.kind === 'user' && !mongoose.isValidObjectId(parsed.userId)) {
+      throw notFound('No such user');
+    }
+    // 'legacy' is the absence of an owner, so it is matched by absence rather than
+    // by a value — that is the only way to list those chats at all.
+    const owner =
+      parsed.kind === 'user'
+        ? { userId: parsed.userId }
+        : parsed.kind === 'session'
+          ? { sessionId: parsed.sessionId }
+          : { userId: { $exists: false }, sessionId: { $exists: false } };
+
+    const conversations = await Conversation.find(owner).sort({ lastMessageAt: -1 }).lean();
+    const ids = conversations.map((c) => c._id);
+
+    const [chat, vision] = await Promise.all([
+      Message.aggregate([
+        { $match: { conversationId: { $in: ids }, role: 'assistant', 'usage.inputTokens': { $exists: true } } },
+        {
+          $group: {
+            _id: { conversationId: '$conversationId', modelId: '$modelId' },
+            messages: { $sum: 1 },
+            inputTokens: { $sum: { $ifNull: ['$usage.inputTokens', 0] } },
+            outputTokens: { $sum: { $ifNull: ['$usage.outputTokens', 0] } },
+            reasoningTokens: { $sum: { $ifNull: ['$usage.reasoningTokens', 0] } },
+            totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
+          },
+        },
+      ]),
+      Message.aggregate([
+        { $match: { conversationId: { $in: ids }, role: 'assistant', 'visionUsage.modelId': { $ne: null } } },
+        {
+          $group: {
+            _id: { conversationId: '$conversationId', modelId: '$visionUsage.modelId' },
+            messages: { $sum: 1 },
+            inputTokens: { $sum: { $ifNull: ['$visionUsage.inputTokens', 0] } },
+            outputTokens: { $sum: { $ifNull: ['$visionUsage.outputTokens', 0] } },
+            reasoningTokens: { $sum: 0 },
+            totalTokens: { $sum: { $ifNull: ['$visionUsage.totalTokens', 0] } },
+          },
+        },
+      ]),
+    ]);
+    const messageCounts = await Message.aggregate([
+      { $match: { conversationId: { $in: ids } } },
+      { $group: { _id: '$conversationId', total: { $sum: 1 } } },
+    ]);
+    const totalByConvo = new Map(messageCounts.map((m) => [String(m._id), m.total]));
+
+    const groupsByConvo = new Map();
+    for (const row of [
+      ...chat.map((r) => ({ ...r, kind: 'chat' })),
+      ...vision.map((r) => ({ ...r, kind: 'vision' })),
+    ]) {
+      const key = String(row._id.conversationId);
+      if (!groupsByConvo.has(key)) groupsByConvo.set(key, []);
+      groupsByConvo.get(key).push({ ...row, modelId: row._id.modelId });
+    }
+
+    const titleById = new Map(conversations.map((c) => [String(c._id), c.title]));
+    const chats = conversations.map((c) => {
+      const totals = rollUp(groupsByConvo.get(String(c._id)) || [], priceOf);
+      return {
+        _id: c._id,
+        title: c.title,
+        modelId: c.modelId,
+        visionModelId: c.visionModelId || null,
+        shared: Boolean(c.shared),
+        createdAt: c.createdAt,
+        lastMessageAt: c.lastMessageAt,
+        messageCount: totalByConvo.get(String(c._id)) || 0,
+        // Fork lineage — "parent chat". The title is resolved when the parent
+        // belongs to the same owner; a fork of someone else's shared chat keeps
+        // the id only, because the parent isn't this admin view's to name.
+        forkedFrom: c.forkedFrom || null,
+        forkedFromTitle: c.forkedFrom ? titleById.get(String(c.forkedFrom)) || null : null,
+        ...totals,
+      };
+    });
+
+    res.json({
+      ownerKey: req.params.ownerKey,
+      chats,
+      totals: rollUp([...groupsByConvo.values()].flat(), priceOf),
+      pricedAt: new Date(),
+    });
+  })
+);
+
+/**
+ * GET /usage/chats/:id — every message in one conversation, with both billed legs
+ * broken out per message. This is the leaf of the drill-down.
+ */
+router.get(
+  '/usage/chats/:id',
+  route(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw notFound('Conversation not found');
+    const conversation = await Conversation.findById(req.params.id).lean();
+    if (!conversation) throw notFound('Conversation not found');
+
+    const [messages, parent, owner] = await Promise.all([
+      Message.find({ conversationId: conversation._id }).sort({ createdAt: 1 }).lean(),
+      conversation.forkedFrom
+        ? Conversation.findById(conversation.forkedFrom).select('title userId sessionId').lean()
+        : null,
+      conversation.userId ? User.findById(conversation.userId).select('email role').lean() : null,
+    ]);
+
+    const rows = messages.map((m) => {
+      const breakdown = messageBreakdown(m, priceOf);
+      return {
+        _id: m._id,
+        role: m.role,
+        createdAt: m.createdAt,
+        modelId: m.modelId || null,
+        // Enough to recognise the turn without dumping whole conversations into
+        // an admin's browser — this page is about cost, not content.
+        preview: (m.content || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+        contentChars: (m.content || '').length,
+        attachments: (m.attachments || []).map((a) => ({
+          // `|| null`, not bare `a.kind`: an undefined value is dropped by
+          // JSON.stringify, so the key would disappear from the response and any
+          // consumer indexing it would throw rather than see a null.
+          kind: a.kind || null,
+          name: a.name || null,
+          pageCount: a.pageCount || null,
+          scanned: Boolean(a.scanned),
+        })),
+        isArtifactEdit: Boolean(m.artifactEdit?.instruction),
+        error: m.error || null,
+        ...breakdown,
+      };
+    });
+
+    res.json({
+      chat: {
+        _id: conversation._id,
+        title: conversation.title,
+        modelId: conversation.modelId,
+        visionModelId: conversation.visionModelId || null,
+        shared: Boolean(conversation.shared),
+        createdAt: conversation.createdAt,
+        lastMessageAt: conversation.lastMessageAt,
+        ownerKey: ownerKey(conversation),
+        ownerEmail: owner?.email || null,
+        forkedFrom: conversation.forkedFrom || null,
+        forkedFromTitle: parent?.title || null,
+        forkedFromOwnerKey: parent ? ownerKey(parent) : null,
+      },
+      messages: rows,
+      totals: {
+        messages: rows.length,
+        billedMessages: rows.filter((r) => r.chat).length,
+        inputTokens: rows.reduce((s, r) => s + r.inputTokens, 0),
+        outputTokens: rows.reduce((s, r) => s + r.outputTokens, 0),
+        reasoningTokens: rows.reduce((s, r) => s + r.reasoningTokens, 0),
+        totalTokens: rows.reduce((s, r) => s + r.totalTokens, 0),
+        costUsd: round6(rows.reduce((s, r) => s + (r.totalCostUsd || 0), 0)),
+        fullyPriced: rows.filter((r) => r.chat).every((r) => r.fullyPriced),
+      },
+      pricedAt: new Date(),
+    });
   })
 );
 
