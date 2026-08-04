@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CircleAlert, CircleCheck, Eye, EyeOff, KeyRound, Radar, ShieldCheck, Trash2, Zap } from 'lucide-react';
 import { useAdminStore } from '../useAdminStore.js';
-import { fullDate, timeAgo } from '../lib/format.js';
+import { formatPrice, fullDate, timeAgo } from '../lib/format.js';
 import {
   Badge,
   Button,
@@ -81,6 +81,15 @@ export default function KeyPanel() {
         ? res.result
         : { ok: false, message: res.error || 'The test request failed' }
     );
+  };
+
+  // The response carries what the call cost, so report it rather than leaving the
+  // admin to go and look it up on the Overview tab.
+  const testCostLine = (result) => {
+    if (!result?.usage) return null;
+    const { inputTokens = 0, outputTokens = 0 } = result.usage;
+    const cost = result.costUsd == null ? null : formatPrice(result.costUsd);
+    return `${inputTokens} in + ${outputTokens} out tokens${cost ? ` · ${cost}` : ''}`;
   };
 
   const discover = async () => {
@@ -189,6 +198,12 @@ export default function KeyPanel() {
           <Button icon={Radar} size="sm" busy={discovering} onClick={discover}>
             Discover models
           </Button>
+          {/* Be straight about which of these two spends money. There is no
+              vendor-neutral way to validate a key without calling the API. */}
+          <span className="text-[11px] text-zinc-500">
+            Test makes one real call (~25 tokens, a fraction of a cent, logged under Admin
+            operations). Discover models is free.
+          </span>
           {keySource === 'db' && (
             <ConfirmInline label="Remove key" busy={savingKey} onConfirm={() => clearProviderKey(slug)}>
               <Button icon={Trash2} size="sm" variant="danger">
@@ -213,6 +228,11 @@ export default function KeyPanel() {
                 {' '}
                 Tested with <Mono>{testResult.modelId}</Mono>.
               </>
+            )}
+            {testCostLine(testResult) && (
+              <div className="mt-1 text-[11px] text-zinc-400">
+                This call cost {testCostLine(testResult)}.
+              </div>
             )}
           </Callout>
         )}

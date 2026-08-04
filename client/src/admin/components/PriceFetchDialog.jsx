@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ExternalLink, Info, Sparkles, Tags } from 'lucide-react';
 import { useAdminStore } from '../useAdminStore.js';
-import { formatPricePair } from '../lib/format.js';
+import { formatPrice, formatPricePair } from '../lib/format.js';
 import {
   Badge,
   Button,
@@ -68,6 +68,26 @@ export default function PriceFetchDialog() {
   const busy = Boolean(busyMap[`price:${modelSlug || providerSlug}`]);
   const autoApply = settings?.requireApproval === false;
   const noCandidates = !configuredId && candidateOptions.length === 0;
+
+  const providerName = provider?.name || providerSlug || 'this company';
+  // Whichever model will actually be billed — the configured default, or the one
+  // picked here when none is set.
+  const chosenModel = useMemo(() => {
+    const found = effectiveId ? models.find((m) => m.slug === effectiveId) : null;
+    if (found) return found;
+    return candidates.find((c) => c.id === effectiveId) || null;
+  }, [effectiveId, models, candidates]);
+
+  // A rough band, not a promise: a typical pricing page runs 1.5k-6k tokens in and
+  // a few hundred out. Showing it beside the model's own rate turns "a small number
+  // of tokens" into a number the reader can actually judge.
+  const estimate = useMemo(() => {
+    const price = chosenModel?.price;
+    if (!price || typeof price.in !== 'number' || typeof price.out !== 'number') return null;
+    const low = (1500 * price.in + 200 * price.out) / 1e6;
+    const high = (6000 * price.in + 800 * price.out) / 1e6;
+    return `${formatPrice(low)}–${formatPrice(high)}`;
+  }, [chosenModel]);
 
   const submit = async () => {
     const trimmed = url.trim();
@@ -205,7 +225,11 @@ export default function PriceFetchDialog() {
 
         <Callout tone="info" icon={Info}>
           The server downloads this page (your browser never touches it) and sends the text to the
-          admin model, which costs a small number of tokens — a few cents at most on a cheap model.
+          admin model. That is a real billed call, and it is charged to{' '}
+          <span className="font-medium">{chosenModel?.companyName || 'the admin model’s company'}</span>{' '}
+          — not to {providerName}. The bill scales with the size of the page, typically 1,500–6,000
+          tokens{estimate ? `, about ${estimate} at this model’s rate` : ''}. Every fetch is recorded
+          with its tokens and cost under <span className="font-medium">Overview → Admin operations</span>.
         </Callout>
 
         {autoApply ? (

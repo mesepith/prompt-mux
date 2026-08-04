@@ -129,6 +129,26 @@ export const SEED_COMPANIES = [
     color: '#22d3ee',
   },
   {
+    id: 'qwen',
+    name: 'Qwen',
+    // Deliberately no envKey: keys for companies added after the dashboard existed
+    // belong in the dashboard (encrypted), not in .env. The vendor's own convention
+    // is DASHSCOPE_API_KEY if you would rather use the environment.
+    envKey: null,
+    adapter: 'openai',
+    // Alibaba's DashScope exposes BOTH a native API and an OpenAI-compatible one.
+    // The native base (/api/v1) is what the model page shows, and it will NOT work
+    // with the openai adapter — the compatible-mode base is the one that does.
+    baseURL: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    // Swap for https://dashscope.aliyuncs.com/compatible-mode/v1 in the China region.
+    baseUrlEnv: 'QWEN_BASE_URL',
+    requiresKey: true,
+    // Qwen prices per model, like Kimi, so the URL lives on the model below.
+    pricingUrl: null,
+    docsUrl: 'https://docs.qwencloud.com/',
+    color: '#a855f7',
+  },
+  {
     id: 'demo',
     name: 'Demo (no key needed)',
     envKey: null,
@@ -201,6 +221,9 @@ export const SEED_MODELS = [
   { id: 'glm-4.5-flash', company: 'zai', name: 'GLM-4.5-Flash', apiModel: 'glm-4.5-flash', tagline: 'Free tier', price: { in: 0, out: 0 }, vision: false, pdf: false, contextWindow: 128_000, maxOutput: 16_384 },
   { id: 'glm-4.6v', company: 'zai', name: 'GLM-4.6V', apiModel: 'glm-4.6v', tagline: 'Vision model — great for the image slot', price: { in: 0.3, out: 0.9 }, vision: true, pdf: false, contextWindow: 64_000, maxOutput: 16_384 },
   { id: 'glm-4.6v-flash', company: 'zai', name: 'GLM-4.6V-Flash', apiModel: 'glm-4.6v-flash', tagline: 'Free vision model', price: { in: 0, out: 0 }, vision: true, pdf: false, contextWindow: 64_000, maxOutput: 16_384 },
+
+  // --- Qwen (Alibaba DashScope, verified against qwencloud.com 2026-08-04) ---
+  { id: 'qwen3.8-max', company: 'qwen', name: 'Qwen3.8-Max', apiModel: 'qwen3.8-max', tagline: 'Flagship, 1M context, multimodal', price: { in: 2.0, out: 6.0, cachedIn: 0.25 }, vision: true, pdf: false, contextWindow: 1_000_000, maxOutput: 131_072, pricingUrl: 'https://www.qwencloud.com/models/qwen3.8-max.md', notes: 'Accepts image and video input. Cache rates from the model page: implicit read $0.25, explicit creation $2.50, explicit read $0.17 per 1M tokens (only the implicit read rate is stored in cachedIn).' },
 
   // --- Demo (works without any API key, streams a sample artifact) ---
   { id: 'demo-artist', company: 'demo', name: 'Demo Artist', apiModel: 'demo-artist', tagline: 'Offline demo with live artifact', price: { in: 0, out: 0 }, vision: false, pdf: false, contextWindow: null, maxOutput: null },

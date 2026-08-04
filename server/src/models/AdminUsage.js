@@ -61,13 +61,22 @@ export const AdminUsage = mongoose.model('AdminUsage', adminUsageSchema);
  */
 export function priceUsage(modelId, usage) {
   const model = getModel(modelId);
-  const inTok = usage?.inputTokens || 0;
-  const outTok = usage?.outputTokens || 0;
-  if (!model?.price || typeof model.price.in !== 'number' || typeof model.price.out !== 'number') {
-    return { costUsd: null, priced: false };
-  }
+  const hasPrice =
+    Boolean(model?.price) &&
+    typeof model.price.in === 'number' &&
+    typeof model.price.out === 'number';
+
+  // No usage at all means the model was never reached — a URL the SSRF guard
+  // refused, or a page with no pricing on it. That is not a call that cost $0; it
+  // is a call that did not happen, and `formatPrice(0)` renders as "Free", which
+  // would read as "this was free" instead of "nothing was billed".
+  if (!usage) return { costUsd: null, priced: hasPrice };
+
+  if (!hasPrice) return { costUsd: null, priced: false };
   return {
-    costUsd: (inTok * model.price.in + outTok * model.price.out) / 1e6,
+    costUsd:
+      ((usage.inputTokens || 0) * model.price.in + (usage.outputTokens || 0) * model.price.out) /
+      1e6,
     priced: true,
   };
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Eye, ExternalLink, Info, Pencil, RefreshCw, Tags } from 'lucide-react';
 import { useAdminStore } from '../useAdminStore.js';
-import { fullDate, timeAgo } from '../lib/format.js';
+import { formatPrice, fullDate, timeAgo } from '../lib/format.js';
 import {
   Badge,
   Button,
@@ -258,6 +258,7 @@ function RecentFetchesCard() {
               <Th>Company</Th>
               <Th>Scope</Th>
               <Th align="right">Rows</Th>
+              <Th align="right">Cost</Th>
               <Th>Status</Th>
               <Th>Source</Th>
               <Th align="right">Actions</Th>
@@ -288,6 +289,18 @@ function RecentFetchesCard() {
                     {total}
                     {applied > 0 && (
                       <span className="text-emerald-400/80"> · {applied} applied</span>
+                    )}
+                  </Td>
+                  {/* What the admin LLM charged to read this page. Shown per fetch,
+                      not just in the Overview total, so the cost is attached to the
+                      action that caused it. */}
+                  <Td align="right" className="whitespace-nowrap tabular-nums text-zinc-400">
+                    {proposal.costUsd == null ? (
+                      <span className="text-zinc-600">—</span>
+                    ) : (
+                      <span title={`${(proposal.totalTokens ?? 0).toLocaleString()} tokens on ${proposal.adminModelId || 'the admin model'}`}>
+                        {formatPrice(proposal.costUsd)}
+                      </span>
                     )}
                   </Td>
                   <Td>

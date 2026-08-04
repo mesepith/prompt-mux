@@ -402,6 +402,10 @@ function proposalResponse(doc) {
     error: doc.error ?? null,
     rawExcerpt: doc.rawExcerpt ?? null,
     usage: doc.usage ?? null,
+    // What this fetch cost, priced against the admin model that ran it. Surfaced
+    // per-proposal as well as in the Overview total, so the cost is visible at the
+    // moment of the action rather than only in a monthly aggregate.
+    costUsd: priceUsage(doc.adminModelId, doc.usage).costUsd,
     createdBy: doc.createdBy ?? null,
     appliedBy: doc.appliedBy ?? null,
     appliedAt: doc.appliedAt ?? null,
@@ -424,6 +428,8 @@ function proposalSummary(doc) {
     itemCount: items.length,
     appliedCount: items.filter((i) => i.applied).length,
     error: doc.error ?? null,
+    totalTokens: doc.usage?.totalTokens ?? null,
+    costUsd: priceUsage(doc.adminModelId, doc.usage).costUsd,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };

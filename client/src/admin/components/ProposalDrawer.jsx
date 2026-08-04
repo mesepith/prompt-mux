@@ -224,6 +224,16 @@ export default function ProposalDrawer() {
             <span className="inline-flex items-center gap-1 text-zinc-500">
               <Sparkles size={11} />
               read by {adminModel?.name || proposal?.adminModelId || 'the admin model'}
+              {/* The admin LLM's bill for this one fetch — it scales with the size of
+                  the page, not with the provider being priced. */}
+              {proposal?.costUsd != null && (
+                <span
+                  className="text-zinc-400"
+                  title={`${(proposal.usage?.totalTokens ?? 0).toLocaleString()} tokens`}
+                >
+                  · cost {formatPrice(proposal.costUsd)}
+                </span>
+              )}
             </span>
           </div>
         </div>
