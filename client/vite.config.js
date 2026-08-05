@@ -10,6 +10,13 @@ export default defineConfig({
         target: 'http://localhost:5050',
         changeOrigin: true,
       },
+      // Published artifact pages are rendered by Express, not by this SPA —
+      // without this, /a/<id> in dev would fall through to index.html. A regex
+      // key, not the '/a' prefix: that would also swallow /api and /assets.
+      '^/a/': {
+        target: 'http://localhost:5050',
+        changeOrigin: true,
+      },
     },
   },
 });

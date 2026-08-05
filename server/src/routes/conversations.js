@@ -2,6 +2,7 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import { Conversation } from '../models/Conversation.js';
 import { Message } from '../models/Message.js';
+import { Artifact } from '../models/Artifact.js';
 import {
   getModel,
   getCompany,
@@ -233,6 +234,9 @@ router.delete('/:id', async (req, res, next) => {
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
     await Conversation.findByIdAndDelete(conversation._id);
     await Message.deleteMany({ conversationId: conversation._id });
+    // Published /a/<id> links outlive the panel they were made from, so they
+    // have to be retired here or a deleted chat keeps serving its artifacts.
+    await Artifact.deleteMany({ conversationId: conversation._id });
     res.json({ ok: true });
   } catch (err) {
     next(err);

@@ -51,6 +51,11 @@ export const useStore = create((set, get) => ({
   artifactEditBusy: false,
   artifactEditError: null,
   artifactEditNote: null,
+  // published artifact links (/a/<publicId>) — see openArtifactShare below
+  artifactShareOpen: false,
+  artifactShare: null, // { publicId, path, shared, messageId, artifactIndex, … }
+  artifactShareBusy: false,
+  artifactShareError: null,
   activeAttachment: null, // { kind, dataUrl, name } — opens the lightbox viewer
   booted: false,
   bootError: null,
@@ -656,7 +661,94 @@ export const useStore = create((set, get) => ({
   // ---------- artifacts / ui ----------
   openArtifact: (artifact) =>
     set({ activeArtifact: artifact, artifactEditError: null, artifactEditNote: null }),
-  closeArtifact: () => set({ activeArtifact: null, artifactEditError: null, artifactEditNote: null }),
+  closeArtifact: () =>
+    set({
+      activeArtifact: null,
+      artifactEditError: null,
+      artifactEditNote: null,
+      artifactShareOpen: false,
+    }),
+
+  /**
+   * The published link for the artifact currently in the panel, or null.
+   *
+   * Matched on (messageId, index) rather than cleared everywhere the panel
+   * re-points: a point-edit saves a NEW message, so the previous version's link
+   * still exists and still serves that version — it just isn't this artifact's
+   * link any more, and must not be offered as one.
+   */
+  activeArtifactShare: () => {
+    const { artifactShare, activeArtifact } = get();
+    if (!artifactShare || !activeArtifact?.messageId) return null;
+    const matches =
+      artifactShare.messageId === activeArtifact.messageId &&
+      artifactShare.artifactIndex === (activeArtifact.index ?? 0);
+    return matches ? artifactShare : null;
+  },
+
+  /** True when this artifact can get a link at all — saved, and in your own chat. */
+  canPublishActiveArtifact: () => {
+    const { activeArtifact, currentId, currentConversationIsOwner } = get();
+    return Boolean(activeArtifact?.messageId && currentId && currentConversationIsOwner);
+  },
+
+  /**
+   * Mint (or re-fetch) the `/a/<publicId>` link for the open artifact. The
+   * server is the one that reads the code out of the stored message, so this
+   * only says *which* artifact; it is idempotent, and the link starts private.
+   * Returns the share record; throws with a message worth showing.
+   */
+  publishActiveArtifact: async () => {
+    const { activeArtifact, currentId } = get();
+    if (!get().canPublishActiveArtifact()) {
+      throw new Error(
+        activeArtifact?.messageId
+          ? 'Only the chat owner can create a link for this artifact.'
+          : 'This artifact gets a link once the reply is saved.'
+      );
+    }
+    // The user can move on while this is in flight; remember what it was for.
+    const requestMessageId = activeArtifact.messageId;
+    const requestIndex = activeArtifact.index ?? 0;
+    set({ artifactShareBusy: true, artifactShareError: null });
+    try {
+      const share = await api.publishArtifact({
+        conversationId: currentId,
+        messageId: requestMessageId,
+        artifactIndex: requestIndex,
+      });
+      set({ artifactShare: share, artifactShareBusy: false });
+      return share;
+    } catch (err) {
+      set({ artifactShareBusy: false, artifactShareError: err.message });
+      throw err;
+    }
+  },
+
+  /** Opens the share dialog, minting the link if this artifact has none yet. */
+  openArtifactShare: async () => {
+    set({ artifactShareOpen: true, artifactShareError: null });
+    if (get().activeArtifactShare()) return;
+    try {
+      await get().publishActiveArtifact();
+    } catch {
+      /* already surfaced as artifactShareError */
+    }
+  },
+  closeArtifactShare: () => set({ artifactShareOpen: false, artifactShareError: null }),
+
+  /** The public/private switch for the open artifact's link. */
+  setActiveArtifactShared: async (shared) => {
+    const share = get().activeArtifactShare();
+    if (!share) return;
+    set({ artifactShareBusy: true, artifactShareError: null });
+    try {
+      const updated = await api.setArtifactShared(share.publicId, shared);
+      set({ artifactShare: updated, artifactShareBusy: false });
+    } catch (err) {
+      set({ artifactShareBusy: false, artifactShareError: err.message });
+    }
+  },
 
   /**
    * Point-and-edit: rewrite ONE element of the open artifact. `start`/`end` are

@@ -14,6 +14,7 @@ import DropZone from './components/DropZone.jsx';
 import AttachmentViewer from './components/AttachmentViewer.jsx';
 import AuthModal from './components/AuthModal.jsx';
 import ShareModal from './components/ShareModal.jsx';
+import ArtifactShareModal from './components/ArtifactShareModal.jsx';
 
 function SessionUsage() {
   const { messages, modelById } = useStore();
@@ -241,6 +242,7 @@ export default function App() {
       <AttachmentViewer key={activeAttachment?.dataUrl?.slice(-12) || 'none'} />
       <AuthModal />
       <ShareModal />
+      <ArtifactShareModal />
     </div>
   );
 }

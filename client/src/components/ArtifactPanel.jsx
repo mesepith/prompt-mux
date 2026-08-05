@@ -9,12 +9,19 @@ import {
   Eye,
   Loader2,
   MousePointerClick,
+  Share2,
   Wand2,
   X,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store/useStore.js';
-import { buildPreviewDoc, openArtifactInNewTab } from '../lib/artifacts.js';
+import {
+  buildPreviewDoc,
+  openArtifactInNewTab,
+  openPendingTab,
+  settlePendingTab,
+} from '../lib/artifacts.js';
+import { artifactUrl } from '../lib/router.js';
 import { scanHtmlNodes } from '../lib/htmlNodes.js';
 
 const PARENT_SOURCE = 'promptmux';
@@ -80,6 +87,9 @@ export default function ArtifactPanel() {
   const currentConversationIsOwner = useStore((s) => s.currentConversationIsOwner);
   const closeArtifact = useStore((s) => s.closeArtifact);
   const editArtifactElement = useStore((s) => s.editArtifactElement);
+  const publishActiveArtifact = useStore((s) => s.publishActiveArtifact);
+  const openArtifactShare = useStore((s) => s.openArtifactShare);
+  const canPublish = useStore((s) => s.canPublishActiveArtifact());
   const clearArtifactEditFeedback = useStore((s) => s.clearArtifactEditFeedback);
   const busy = useStore((s) => s.artifactEditBusy);
   const editError = useStore((s) => s.artifactEditError);
@@ -209,6 +219,33 @@ export default function ArtifactPanel() {
     post({ type: 'select', id: null });
   };
 
+  /**
+   * Opens the artifact on its own page. A saved artifact in your own chat gets a
+   * real, linkable `/a/<publicId>` address (private until it's shared); one that
+   * has no link to give — still streaming, or someone else's shared chat — falls
+   * back to the self-contained sandboxed tab.
+   *
+   * The tab is claimed before the round trip, because a popup blocker only
+   * allows window.open from inside the click itself.
+   */
+  const openInNewTab = async () => {
+    if (!canPublish) {
+      if (!openArtifactInNewTab(activeArtifact))
+        setLocalError('Your browser blocked the new tab — allow pop-ups for this site.');
+      return;
+    }
+    const tab = openPendingTab();
+    try {
+      const share = await publishActiveArtifact();
+      const url = artifactUrl(share.publicId);
+      // Popup blocked: no tab to send anywhere, so hand over the link instead.
+      if (!settlePendingTab(tab, url)) openArtifactShare();
+    } catch (err) {
+      settlePendingTab(tab, null);
+      setLocalError(err?.message || 'Could not create a link for this artifact.');
+    }
+  };
+
   const apply = async () => {
     const text = instruction.trim();
     if (!text || !selection || busy) return;
@@ -313,12 +350,26 @@ export default function ArtifactPanel() {
         </button>
         <button
           type="button"
-          title="Open in new tab"
-          onClick={() => openArtifactInNewTab(activeArtifact)}
+          title={
+            canPublish
+              ? 'Open on its own page — a real link you can share'
+              : 'Open in new tab'
+          }
+          onClick={openInNewTab}
           className="rounded-lg p-2 text-zinc-500 transition-colors hover:bg-white/5 hover:text-zinc-200"
         >
           <ExternalLink size={15} />
         </button>
+        {canPublish && (
+          <button
+            type="button"
+            title="Share — get a link anyone can open"
+            onClick={openArtifactShare}
+            className="rounded-lg p-2 text-zinc-500 transition-colors hover:bg-white/5 hover:text-zinc-200"
+          >
+            <Share2 size={15} />
+          </button>
+        )}
         <button
           type="button"
           title="Copy code"

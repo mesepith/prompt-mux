@@ -54,6 +54,16 @@ export function shareUrl(id) {
   return `${window.location.origin}${conversationPath(id)}`;
 }
 
+/**
+ * Absolute link to a published artifact. `/a/<publicId>` is served by Express
+ * itself (routes/artifactPage.js), NOT by this SPA — it is a bare page with the
+ * artifact in a sandboxed frame and none of the app on it — so it is never
+ * routed here, only ever opened as a real navigation.
+ */
+export function artifactUrl(publicId) {
+  return `${window.location.origin}/a/${publicId}`;
+}
+
 /** URL for an admin tab, or null when the segment isn't known yet. */
 export function adminPath(tab) {
   if (!adminSegment) return null;

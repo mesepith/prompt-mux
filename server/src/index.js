@@ -16,6 +16,8 @@ import { requireAdmin } from './middleware/requireAdmin.js';
 import modelsRouter from './routes/models.js';
 import authRouter from './routes/auth.js';
 import conversationsRouter from './routes/conversations.js';
+import artifactsRouter from './routes/artifacts.js';
+import artifactPageRouter from './routes/artifactPage.js';
 import adminRouter from './routes/admin.js';
 
 const app = express();
@@ -46,6 +48,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true, name: 'prompt-mux' }))
 app.use('/api/models', modelsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/conversations', conversationsRouter);
+app.use('/api/artifacts', artifactsRouter);
 
 // The admin API lives under the same private segment as the dashboard, so a scan
 // of a public host finds nothing to probe. Mounted with a param and checked at
@@ -67,6 +70,10 @@ app.use('/api/:adminSegment', (req, res, next) => {
 });
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Published artifacts. A real, shareable page — NOT the SPA — so it has to be
+// mounted ahead of the static assets and the catch-all fallback below.
+app.use('/a', artifactPageRouter);
 
 // Production: serve the built client (client/dist) as a single deployable app.
 const clientDist = path.resolve(__dirname, '../../client/dist');

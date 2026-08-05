@@ -21,6 +21,13 @@ live previews.
 - **Live artifacts** — ask for a website, game, dashboard or component and the model's
   self-contained HTML/SVG output renders instantly in a sandboxed side panel
   (Preview / Code tabs, copy, open-in-new-tab).
+- **A link per artifact** — the artifact panel's ↗ button opens the artifact on its own
+  page at `/a/<id>`: just the running app or graphic, none of the chat around it. The
+  link is **private** to begin with — only you can load it — and the share button next to
+  it flips it public, at which point anyone with the URL can open it without signing in.
+  Flip it back off and the link stops working for everyone else. Each version of an
+  artifact keeps its own link, so a page you sent someone doesn't change under them when
+  you keep editing.
 - **Point & edit** — no more "please change the button" and getting a whole new page back.
   Hit the crosshair button in the artifact panel, click the heading/button/section you
   want, and a little box opens next to it: say what to change and **only that element's
@@ -79,7 +86,8 @@ prompt-mux/
 │       ├── models/         # Conversation, Message, User, Provider, LlmModel, ... (Mongoose)
 │       ├── lib/            # secrets, PDF/image handling, SSRF-guarded fetch, price extraction
 │       ├── providers/      # openai / anthropic / google / demo adapters
-│       └── routes/         # /api/models, /api/conversations (+ SSE chat), /api/auth, /api/admin
+│       └── routes/         # /api/models, /api/conversations (+ SSE chat), /api/auth,
+│                           #   /api/artifacts + the public /a/<id> page, /api/admin
 ├── client/                 # React SPA
 │   └── src/
 │       ├── api/            # fetch helpers + SSE stream reader
@@ -339,8 +347,10 @@ simply show as locked in the model picker.
   by a model that just read your PDFs and web pages: without it, one poisoned document
   could have the "artifact" quietly POST your whole chat history somewhere.
   Consequence: artifacts can't load remote images or CDN assets (the system prompt
-  already forbids those — they'd show as broken images). "Open in new tab" is sandboxed
-  the same way.
+  already forbids those — they'd show as broken images). The published `/a/<id>` page is
+  sandboxed exactly the same way: it is a bare wrapper whose only content is the artifact
+  inside an `allow-scripts` frame, so even a page you shared with the world cannot read
+  its visitors' cookies or call the API on their behalf.
   One residual: a preview can still navigate *itself* to an external URL (no CSP
   directive or sandbox flag covers self-navigation). That's visible — the preview pane
   replaces itself — and since it can no longer read the API, it can only carry data the
@@ -367,7 +377,10 @@ simply show as locked in the model picker.
     it's counted per `sessionId` and that id comes from the browser — clearing site data
     yields a fresh allowance. Treat it as a nudge, not a spending limit; `ALLOWED_EMAILS`
     plus turning anonymous use off is the real control.
-  - A `/c/<id>` link only opens for the account (or session) that owns that chat.
+  - A `/c/<id>` link only opens for the account (or session) that owns that chat, and a
+    `/a/<id>` artifact link only for its owner until they turn sharing on. A private link
+    that isn't yours renders the same "not available" page as a wrong one, so the id
+    space is not worth scanning.
   - Express runs with `trust proxy: 'loopback'` so `req.ip` and the audit log show the real
     client address behind nginx instead of `127.0.0.1`.
 - Terminate TLS in front of the app (see `deploy/nginx.conf` + certbot) — the login cookie

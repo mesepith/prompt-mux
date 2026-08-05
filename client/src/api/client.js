@@ -66,6 +66,22 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Published artifacts (/a/<publicId>). `publishArtifact` only names which
+  // artifact to publish — the server snapshots the code out of the stored
+  // message — and it is idempotent, so the same artifact keeps the same link.
+  // A new link is private until `setArtifactShared(publicId, true)`.
+  publishArtifact: ({ conversationId, messageId, artifactIndex }) =>
+    request('/artifacts', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, messageId, artifactIndex }),
+    }),
+  getArtifact: (publicId) => request(`/artifacts/${encodeURIComponent(publicId)}`),
+  setArtifactShared: (publicId, shared) =>
+    request(`/artifacts/${encodeURIComponent(publicId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ shared }),
+    }),
+
   // Auth
   authMe: () => request('/auth/me'),
   login: (email, password) =>

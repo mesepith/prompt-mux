@@ -133,12 +133,57 @@ export function buildPreviewDoc(artifact, { picker = false } = {}) {
 }
 
 /**
+ * Opens a placeholder tab, to be pointed at a published artifact once the
+ * server has minted its link.
+ *
+ * The round trip has to happen *after* the click, but a popup blocker only
+ * honours `window.open` from inside the click that caused it — so the tab is
+ * claimed first and navigated second, via `settlePendingTab`. Returns null when
+ * the popup was blocked, which callers must handle rather than assume.
+ */
+export function openPendingTab(label = 'Preparing your artifact link…') {
+  const tab = window.open('', '_blank');
+  if (!tab) return null;
+  tab.document.write(
+    [
+      '<!DOCTYPE html><html><head><meta charset="utf-8">',
+      `<title>${escapeHtml(label)}</title>`,
+      '<style>html,body{margin:0;height:100%;display:grid;place-items:center;',
+      'background:#0b0b0f;color:#a1a1aa;font:500 14px ui-sans-serif,system-ui,sans-serif}',
+      '</style></head>',
+      `<body>${escapeHtml(label)}</body></html>`,
+    ].join('')
+  );
+  tab.document.close();
+  return tab;
+}
+
+/**
+ * Sends a tab from `openPendingTab` to its real URL, or closes it when the link
+ * could not be created — a tab left sitting on the placeholder is worse than no
+ * tab at all. `replace` keeps the placeholder out of the visitor's history.
+ */
+export function settlePendingTab(tab, url) {
+  if (!tab) return false;
+  if (!url) {
+    tab.close();
+    return false;
+  }
+  tab.location.replace(url);
+  return true;
+}
+
+/**
  * Opens the artifact in a new tab, inside a sandboxed iframe on a blank wrapper
  * page. It must NOT be a blob: URL: those inherit this app's origin, so the
  * model's JS would run same-origin with the user's chats and API. The artifact
  * only ever reaches an opaque origin, and only through a quoted srcdoc
  * attribute (escaping " and & is what makes breaking out of it impossible).
  * Returns false if the browser blocked the popup.
+ *
+ * This is the fallback for artifacts that have no link yet — one still
+ * streaming, or one in someone else's shared chat. Anything saved and owned
+ * gets a real `/a/<publicId>` page instead (see the panel's openInNewTab).
  */
 export function openArtifactInNewTab(artifact) {
   const doc = buildPreviewDoc(artifact);

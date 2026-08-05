@@ -9,7 +9,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPreviewDoc, extractArtifacts, openArtifactInNewTab } from './artifacts.js';
+import {
+  buildPreviewDoc,
+  extractArtifacts,
+  openArtifactInNewTab,
+  openPendingTab,
+  settlePendingTab,
+} from './artifacts.js';
 
 const cspAt = (doc) => doc.indexOf('Content-Security-Policy');
 const headAt = (doc) => doc.search(/<head[\s>]/i);
@@ -150,4 +156,60 @@ test('a blocked popup is reported instead of silently doing nothing', () => {
   } finally {
     globalThis.window = previous;
   }
+});
+
+// --- the published-link path: claim the tab during the click, navigate after
+// the server answers. A placeholder tab left behind is worse than none.
+function withStubbedWindow(open, fn) {
+  const previous = globalThis.window;
+  globalThis.window = { open };
+  try {
+    return fn();
+  } finally {
+    globalThis.window = previous;
+  }
+}
+
+const stubTab = () => {
+  const tab = {
+    written: '',
+    closed: false,
+    replaced: null,
+    document: { write: (html) => { tab.written += html; }, close: () => {} },
+    location: { replace: (url) => { tab.replaced = url; } },
+    close: () => { tab.closed = true; },
+  };
+  return tab;
+};
+
+test('the pending tab shows a placeholder and nothing executable', () => {
+  const tab = stubTab();
+  const opened = withStubbedWindow(() => tab, () => openPendingTab());
+  assert.equal(opened, tab);
+  assert.match(tab.written, /Preparing your artifact link/);
+  assert.equal(/<script/i.test(tab.written), false);
+});
+
+test('a hostile label cannot inject markup into the placeholder', () => {
+  const tab = stubTab();
+  withStubbedWindow(() => tab, () => openPendingTab('</style><script>alert(1)</script>'));
+  assert.equal(/<script/i.test(tab.written), false, 'the label stays inert text');
+  assert.match(tab.written, /&lt;script&gt;/);
+});
+
+test('settling sends the tab to the link, or closes it when there is none', () => {
+  const ok = stubTab();
+  assert.equal(settlePendingTab(ok, 'https://example.test/a/abc'), true);
+  assert.equal(ok.replaced, 'https://example.test/a/abc');
+  assert.equal(ok.closed, false);
+
+  const failed = stubTab();
+  assert.equal(settlePendingTab(failed, null), false);
+  assert.equal(failed.closed, true);
+  assert.equal(failed.replaced, null);
+});
+
+test('a blocked pending tab is reported so the caller can offer the link instead', () => {
+  assert.equal(withStubbedWindow(() => null, () => openPendingTab()), null);
+  assert.equal(settlePendingTab(null, 'https://example.test/a/abc'), false);
 });

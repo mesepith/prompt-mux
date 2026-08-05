@@ -291,6 +291,31 @@ private URL (never `/admin` — see the routing rules below).
   so the preview must never be able to reach the API. `openArtifactInNewTab()` follows the
   same rule via a sandboxed iframe on a blank page — never a `blob:` URL, which would
   inherit this app's origin.
+- **Published artifacts** (`/a/<publicId>`) — the panel's ↗ button gives a saved artifact a
+  real, sendable address instead of an `about:blank` tab.
+  - `POST /api/artifacts` is idempotent per (conversation, message, artifactIndex), so the
+    same artifact always resolves to the same link, and **the body only names which
+    artifact** — the server snapshots the code out of the stored message with the same
+    `extractArtifacts`. Never accept client-sent code here: this endpoint would otherwise
+    host arbitrary HTML on the app's own origin, the one place artifact code must not run.
+  - A link is `shared: false` when minted; `PATCH /api/artifacts/:publicId { shared }` is
+    the only thing that opens it up. `GET /a/<id>` renders the identical "not available"
+    page for a wrong id, a deleted one and a private one that isn't yours — don't make the
+    three distinguishable, or the id space becomes worth scanning. `publicId` is 96 random
+    bits (`lib/publicArtifact.js`) because while a link is private it *is* the access
+    control.
+  - The page (`lib/artifactPage.js`) is a bare wrapper: the artifact reaches it only as a
+    quoted `srcdoc` on an `allow-scripts` frame, under the same `PREVIEW_CSP`. Both halves
+    are asserted in `artifactPage.test.js`; it duplicates the client's `buildPreviewDoc`
+    minus the picker, so keep the two in sync like the fence regex.
+  - The route is mounted in `index.js` **before** `express.static` and the SPA fallback,
+    and proxied in `client/vite.config.js` for dev — otherwise `/a/<id>` renders the chat
+    app instead.
+  - Owner checks for the *page* can only use what a navigation carries: the `auth-token`
+    cookie, or the `pm-session` cookie that `POST /api/artifacts` writes for an anonymous
+    owner (the API keeps using the `X-Session-Id` header). Artifact rows carry their own
+    `userId`/`sessionId`, so `mergeAnonymousSession()` moves them at login and
+    `DELETE /api/conversations/:id` retires them.
 - **No CORS, and per-user authentication.** The client is always same-origin (Express serves
   it in prod, Vite proxies `/api` in dev), so `server/src/index.js` sends no
   `Access-Control-Allow-Origin` — adding bare `cors()` back would let any site the user
@@ -478,6 +503,20 @@ curl -s -X POST localhost:5050/api/conversations/<id>/artifact-edit \
 ```
 
 The `demo-artist` model streams offline (no keys needed) — use it for end-to-end checks.
+
+Published artifact links, with the same `<id>`/`<msg>` from the run above:
+
+```bash
+# publish (private) — idempotent, so the same call must return the same publicId
+curl -s -b jar -H 'X-Session-Id: s1' -H 'Content-Type: application/json' \
+  -X POST localhost:5050/api/artifacts \
+  -d '{"conversationId":"<id>","messageId":"<msg>","artifactIndex":0}'
+curl -s -o /dev/null -w '%{http_code}\n' localhost:5050/a/<publicId>          # stranger: 404
+curl -s -b jar -o /dev/null -w '%{http_code}\n' localhost:5050/a/<publicId>   # owner: 200
+curl -s -b jar -H 'Content-Type: application/json' \
+  -X PATCH localhost:5050/api/artifacts/<publicId> -d '{"shared":true}'
+curl -s localhost:5050/a/<publicId> | grep -c 'allow-same-origin'             # must be 0
+```
 
 ## Production
 
