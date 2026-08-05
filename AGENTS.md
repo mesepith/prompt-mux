@@ -449,6 +449,24 @@ private URL (never `/admin` — see the routing rules below).
   messages route).
 - Assistant messages with `error` set are excluded from provider history; keep that
   filter when touching history building.
+- **`Markdown.jsx`: keep `MD_COMPONENTS` and the plugin arrays at module scope.** A
+  component type (or `components` object) built inside the render is a new type every
+  render, so React remounts the whole subtree — while a reply streams, that rebuilt every
+  code block on every token and threw away its scroll position. Same file: read code text
+  with `lib/codeText.js#codeText`, never `String(children)` — rehype-highlight replaces the
+  raw string with `<span>` tokens, and stringifying those gave `[object Object]` to the
+  copy button and undercounted the lines the gutter numbers.
+- Chat code blocks are capped at `max-h-[26rem]` and scroll internally, with a sticky
+  line-number gutter (`.codeblock-*` in `index.css`). The `min-w-max` on the inner `pre` is
+  load-bearing: a sticky child only stays pinned inside its containing block, so without it
+  the gutter unpins once the code scrolls past one viewport width.
+- **Full screen is two mechanisms, and the CSS one is the guarantee.** The button calls
+  `requestFullscreen()` *and* sets `.codeblock-expanded` (`fixed inset-0`). Keep both: iOS
+  Safari only fullscreens `<video>`, and an embedded/permission-restricted browser rejects
+  the call with "Permissions check failed" — the class alone still covers the viewport, so
+  the request is fire-and-forget with a swallowed rejection. The `fullscreenchange`
+  listener exists because Esc/F11 leave fullscreen without React knowing, and the overlay
+  would otherwise stay pinned over the chat.
 
 ## Verifying changes
 

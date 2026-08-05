@@ -124,6 +124,63 @@ body {
 .codeblock-lang {
   @apply font-mono text-xs uppercase tracking-wider text-zinc-500;
 }
-.codeblock-copy {
+.codeblock-meta {
+  @apply normal-case tracking-normal text-zinc-600;
+}
+.codeblock-actions {
+  @apply flex shrink-0 items-center gap-1;
+}
+.codeblock-action {
   @apply flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-400 transition-colors hover:bg-white/5 hover:text-zinc-200;
+}
+
+/* ---- full-screen view (the ⤢ button) ----
+   Paired with a real requestFullscreen() where the browser allows it on a plain
+   element. These rules are the half that must always work: on iOS Safari, where
+   only <video> can go fullscreen, this alone still covers the viewport. */
+.codeblock-expanded {
+  @apply fixed inset-0 z-50 m-0 flex flex-col rounded-none border-0;
+}
+.codeblock-expanded .codeblock-header {
+  @apply shrink-0;
+}
+.codeblock-expanded .codeblock-body {
+  /* min-h-0: a flex child otherwise refuses to shrink below its content, so the
+     box would grow past the screen instead of scrolling inside it.
+     overscroll-contain: reaching the end must not start scrolling the chat
+     underneath — only correct here, since the capped inline block *should* hand
+     the scroll on to the page. */
+  @apply max-h-none min-h-0 flex-1 overscroll-contain;
+}
+/* The UA gives a fullscreen element a white backdrop; keep both dark. */
+.codeblock:fullscreen {
+  @apply bg-[#0d0d12];
+}
+.codeblock::backdrop {
+  background: #09090b;
+}
+
+/* The single scroll box: long code is capped here and scrolls inside its own
+   frame instead of stretching the transcript. Both directions live on this one
+   element so the gutter and the code can never scroll out of step. */
+.codeblock-body {
+  @apply max-h-[26rem] overflow-auto;
+}
+/* Beats the generic `.md pre` rule above (same specificity would only win on
+   source order — the extra class makes it explicit).
+   min-w-max is load-bearing, not cosmetic: a sticky child can only stay pinned
+   inside its containing block, so without it the gutter unpins as soon as the
+   code is scrolled past one viewport's width. */
+.md .codeblock-body > pre {
+  @apply m-0 flex min-w-max items-start overflow-visible p-0 font-mono text-[13px] leading-6;
+}
+/* Sticky so the numbers stay put while the code scrolls sideways under them;
+   the opaque background is what hides the code passing beneath. */
+.md .codeblock-body > pre > .codeblock-gutter {
+  @apply sticky left-0 z-10 select-none border-r border-white/[0.06] bg-[#0d0d12] px-3 py-4 text-right text-zinc-600;
+}
+/* flex-none: the code keeps its natural width, which is what gives the box
+   something to scroll horizontally. */
+.md .codeblock-body > pre > code {
+  @apply block flex-none p-4;
 }
