@@ -1,9 +1,22 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { parseDataUrl } from '../lib/images.js';
 
+const CACHE = { cache_control: { type: 'ephemeral' } };
+
 // Anthropic format: image blocks with base64 sources, then the text block.
-function toAnthropicMessage(m) {
-  if (!m.images?.length) return { role: m.role, content: m.content };
+//
+// `m.cacheBoundary` marks the end of the reusable prefix (see the caller). Unlike
+// every OpenAI-compatible vendor, Anthropic caches nothing unless asked, so this
+// marker is the whole difference between paying full price for a growing chat
+// history every turn and paying ~10% for the part already sent. Content blocks
+// are the only place the flag can go, so a plain string message is promoted to a
+// one-block array when it carries the boundary.
+export function toAnthropicMessage(m) {
+  if (!m.images?.length) {
+    return m.cacheBoundary
+      ? { role: m.role, content: [{ type: 'text', text: m.content || '', ...CACHE }] }
+      : { role: m.role, content: m.content };
+  }
   return {
     role: m.role,
     content: [
@@ -11,7 +24,7 @@ function toAnthropicMessage(m) {
         const { mimeType, base64 } = parseDataUrl(url);
         return { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } };
       }),
-      { type: 'text', text: m.content || '' },
+      { type: 'text', text: m.content || '', ...(m.cacheBoundary ? CACHE : {}) },
     ],
   };
 }
@@ -33,10 +46,19 @@ export async function streamChat({ apiKey, baseURL, apiModel, messages, system, 
 
   let content = '';
   let inputTokens = 0;
+  let cachedInputTokens = 0;
   let outputTokens = 0;
   for await (const event of stream) {
     if (event.type === 'message_start') {
-      inputTokens = event.message?.usage?.input_tokens ?? 0;
+      const u = event.message?.usage || {};
+      // Anthropic's input_tokens EXCLUDES cached ones, unlike everyone else's
+      // prompt_tokens. Add them back so inputTokens always means "the size of the
+      // prompt" and cachedInputTokens is a subset of it — otherwise a cache hit
+      // would look like the prompt had shrunk.
+      const read = u.cache_read_input_tokens ?? 0;
+      const written = u.cache_creation_input_tokens ?? 0;
+      cachedInputTokens = read;
+      inputTokens = (u.input_tokens ?? 0) + read + written;
     } else if (event.type === 'message_delta') {
       // output_tokens is cumulative across message_delta events
       outputTokens = event.usage?.output_tokens ?? outputTokens;
@@ -47,7 +69,7 @@ export async function streamChat({ apiKey, baseURL, apiModel, messages, system, 
   }
   const usage =
     inputTokens || outputTokens
-      ? { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }
+      ? { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, cachedInputTokens }
       : null;
   return { content, usage };
 }

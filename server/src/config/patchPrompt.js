@@ -13,17 +13,25 @@
  * locates and splices (lib/patch.js). The model never has to be trusted to
  * reproduce the document, because it is never asked to.
  *
- * These rules are appended to SYSTEM_PROMPT only when the chat actually has an
- * artifact — no provider here uses prompt caching (checked: nothing sets
- * cache_control), so a per-conversation system prompt costs nothing.
+ * These rules are appended to SYSTEM_PROMPT on EVERY request, artifact or not, and
+ * that is deliberate. Adding them only once an artifact exists changes the first
+ * bytes of the prompt on the second turn, and prompt caching matches on a prefix —
+ * so the turn right after an artifact is created, the most expensive turn in the
+ * chat, got a 0% cache hit. Seen in a real chat here: 18,923 input tokens, none of
+ * them cached, purely because the system prompt had grown.
+ *
+ * The cost of always sending them is ~250 tokens on a chat that never makes an
+ * artifact; the cost of not doing so is every artifact chat losing its cache at
+ * the worst possible moment. Hence the conditional wording ("if this chat already
+ * has an artifact") rather than a conditional prompt.
  */
 
 export const PATCH_RULES = `
-EDITING THE LIVE ARTIFACT
+EDITING A LIVE ARTIFACT
 
-This chat already has an artifact. Its current source is included with the user's message, with a numbered outline of its parts.
+If this chat already has an artifact, its current source is included with the user's message, with a numbered outline of its parts.
 
-When the user asks you to change, fix, add or remove anything in it, DO NOT reproduce the document. Reply with one short sentence saying what you changed, then one edit block per change:
+When the user asks you to change, fix, add or remove anything in an existing artifact, DO NOT reproduce the document. Reply with one short sentence saying what you changed, then one edit block per change:
 
 \`\`\`patch
 <<<<<<< SEARCH
@@ -49,6 +57,9 @@ Rules for edit blocks:
  */
 export const ARTIFACT_SOURCE_MAX = 120_000;
 const HEAD_KEEP = 24_000;
+
+/** Separates the inlined source from the user's own message that follows it. */
+export const END_OF_SOURCE = "[End of artifact source. The user's message follows.]";
 
 function sourceForPrompt(code) {
   if (code.length <= ARTIFACT_SOURCE_MAX) return { source: code, truncated: false };
@@ -89,6 +100,11 @@ export function buildArtifactContext({ code, language, title, outline, rewrite =
     ...(truncated
       ? ['', 'NOTE: the middle of the source above was omitted. If the lines you need are not shown, say so instead of guessing at them.']
       : []),
+    // The source is inlined BEFORE the user's words (for prompt caching), so
+    // without a closing line the two run together and hundreds of lines of code
+    // sit between the model and the actual request.
+    '',
+    END_OF_SOURCE,
   ].join('\n');
 }
 

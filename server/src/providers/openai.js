@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { cachedFromOpenAIUsage } from '../lib/cachedTokens.js';
 
 /**
  * Unified streaming interface. All providers implement:
@@ -49,6 +50,10 @@ export async function streamChat({ apiKey, baseURL, apiModel, messages, system, 
         outputTokens: chunk.usage.completion_tokens ?? 0,
         totalTokens: chunk.usage.total_tokens ?? 0,
         reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
+        // A SUBSET of inputTokens, not an addition. OpenAI-compatible vendors
+        // cache long prefixes automatically — without reading this back the app
+        // bills already-cached tokens at full price and overstates every long chat.
+        cachedInputTokens: cachedFromOpenAIUsage(chunk.usage),
       };
     }
     const delta = chunk.choices?.[0]?.delta?.content || '';

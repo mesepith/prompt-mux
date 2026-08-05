@@ -160,9 +160,20 @@ function CostTile({ totals }) {
 }
 
 function TokenTiles({ totals }) {
+  const cached = totals.cachedInputTokens || 0;
+  const input = totals.inputTokens || 0;
+  // Share of input the vendor served from its prompt cache. The single most useful
+  // number for "why is the bill this size": in a long chat most input is the
+  // history being re-sent, and a high figure here means it is being re-sent cheaply.
+  const share = input > 0 ? Math.round((cached / input) * 100) : 0;
   return (
     <>
-      <StatTile label="Input" value={num(totals.inputTokens)} hint="tokens" />
+      <StatTile label="Input" value={num(input)} hint="tokens" />
+      <StatTile
+        label="Cached input"
+        value={num(cached)}
+        hint={input > 0 ? `${share}% of input, billed at the cache rate` : 'inside input, not extra'}
+      />
       <StatTile label="Output" value={num(totals.outputTokens)} hint="tokens" />
       <StatTile
         label="Reasoning"

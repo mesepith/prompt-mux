@@ -83,6 +83,9 @@ export async function streamChat({ apiKey, apiModel, messages, system, signal, o
         outputTokens: meta.candidatesTokenCount ?? 0,
         totalTokens: meta.totalTokenCount ?? 0,
         reasoningTokens: meta.thoughtsTokenCount ?? 0,
+        // Gemini caches implicitly on recent models and reports the hit here.
+        // promptTokenCount already includes it, so this is a subset, not an extra.
+        cachedInputTokens: meta.cachedContentTokenCount ?? 0,
       };
     }
     const text = chunk.text();

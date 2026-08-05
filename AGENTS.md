@@ -353,6 +353,30 @@ private URL (never `/admin` — see the routing rules below).
   `POST /api/conversations/:id/fork`; the original conversation ID is never reused for
   another user's messages. The client tracks `isOwner`/`shared` from the GET response to
   show/hide editor controls and to decide whether to fork before writing.
+- **Prompt caching.** Measured on a real chat here, **53% of all input tokens paid for were
+  text already sent in an earlier turn** — that is what caching discounts.
+  - Every OpenAI-compatible vendor caches long prefixes automatically; **Anthropic caches
+    nothing without an explicit `cache_control` block.** The route marks the message before
+    the newest one with `cacheBoundary: true` and `providers/anthropic.js` turns that into the
+    marker; other adapters ignore the flag. One boundary only — each costs a write at 1.25x.
+  - `usage.cachedInputTokens` is always a **SUBSET of `inputTokens`, never an addition**.
+    Anthropic is the trap: its `input_tokens` EXCLUDES cached tokens, so its adapter adds
+    `cache_read` + `cache_creation` back in. Get this backwards and you either double-bill the
+    prompt or report one that shrank. `lib/cachedTokens.js` sniffs the field names (they differ
+    per vendor) rather than switching on company id, so a new OpenAI-compatible vendor needs
+    no code — the adapter rule from above still holds.
+  - Priced at `price.cachedIn` (already in the registry, fetched by the price scraper) in BOTH
+    `client/src/lib/usage.js#messageCost` and `server/src/lib/usageReport.js#costOfCall` —
+    keep the two in step. No `cachedIn` rate means bill hits at the full rate: overstating is
+    safe, inventing a discount the vendor never gave is not.
+  - **Caching only ever reuses a PREFIX.** That is why `buildArtifactContext` is prepended to
+    the user's message rather than appended — anything after the question can never be cached,
+    and the question is the one part that changes every turn. `END_OF_SOURCE` closes the block
+    so the request doesn't run into hundreds of lines of code.
+  - Known cache-breaker, left alone deliberately: `pdfInjection` gives the LAST message
+    `PDF_CURRENT_MAX_CHARS` and older ones `PDF_HISTORY_MAX_CHARS`, so a PDF message's text
+    changes once it stops being last, invalidating the cache from there on. Fixing it would
+    change what the model sees; it only affects chats with PDFs.
 - **Chat-driven patch edits** — the second surgical path, and the one that covers a game.
   Point & edit only reaches clickable elements (`script`/`style` are NOT_PICKABLE), so every
   "fix the collision" used to regenerate the whole document: measured on a real 618-line

@@ -34,12 +34,18 @@ const messageSchema = new mongoose.Schema(
       inputTokens: { type: Number },
       outputTokens: { type: Number },
       totalTokens: { type: Number },
+      // Prompt-cache hits — a SUBSET of inputTokens, never an addition. Priced at
+      // price.cachedIn (roughly a tenth of price.in) where a model has that rate.
+      cachedInputTokens: { type: Number },
     },
     // Token usage reported by the provider (assistant messages only).
     usage: {
       inputTokens: { type: Number },
       outputTokens: { type: Number },
       totalTokens: { type: Number },
+      // Prompt-cache hits — a SUBSET of inputTokens, never an addition. Priced at
+      // price.cachedIn (roughly a tenth of price.in) where a model has that rate.
+      cachedInputTokens: { type: Number },
       reasoningTokens: { type: Number },
     },
     // Set when generation failed (bad API key, rate limit, ...).

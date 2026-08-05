@@ -1,17 +1,33 @@
-import { ArrowDown, ArrowUp, Coins, Image as ImageIcon, Sigma } from 'lucide-react';
+import { ArrowDown, ArrowUp, Coins, Image as ImageIcon, Sigma, Zap } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
-import { formatCost, formatTokens, formatTokensFull, messageCost } from '../lib/usage.js';
+import { formatCost, formatTokens, formatTokensFull, messageCost, splitInput } from '../lib/usage.js';
 
 function UsageTable({ usage, model }) {
   if (!usage) return null;
   const total = usage.totalTokens ?? (usage.inputTokens || 0) + (usage.outputTokens || 0);
+  // Cache hits are part of Input, so they get their own row at their own rate
+  // rather than being folded in — otherwise the arithmetic in this table wouldn't
+  // add up to the cost shown beside it.
+  const { fullPrice, cachePrice } = splitInput(usage);
+  const cachedRate =
+    typeof model?.price?.cachedIn === 'number' ? model.price.cachedIn : model?.price?.in;
   const rows = [
     {
-      label: 'Input',
-      tokens: usage.inputTokens,
+      label: cachePrice > 0 ? 'Input (new)' : 'Input',
+      tokens: fullPrice,
       rate: model?.price?.in,
-      subtotal: model?.price ? (usage.inputTokens * model.price.in) / 1e6 : null,
+      subtotal: model?.price ? (fullPrice * model.price.in) / 1e6 : null,
     },
+    ...(cachePrice > 0
+      ? [
+          {
+            label: 'Input (cached)',
+            tokens: cachePrice,
+            rate: cachedRate,
+            subtotal: model?.price ? (cachePrice * cachedRate) / 1e6 : null,
+          },
+        ]
+      : []),
     {
       label: 'Output',
       tokens: usage.outputTokens,
@@ -94,6 +110,13 @@ export default function MessageMeta({ message, isStreaming = false }) {
   const visionCost = messageCost(visionUsage, visionModel);
   const cost = mainCost != null || visionCost != null ? (mainCost || 0) + (visionCost || 0) : null;
   const costStr = formatCost(cost);
+
+  // Prompt-cache hits across both calls. `hasCacheRate` decides whether the saving
+  // is real or merely reported: without price.cachedIn the hit is billed at the full
+  // rate, and saying so is more use than hiding it.
+  const cachedTokens =
+    splitInput(usage).cachePrice + splitInput(visionUsage).cachePrice;
+  const hasCacheRate = typeof model?.price?.cachedIn === 'number';
   const liveTokens = isStreaming ? Math.ceil(message.content.length / 4) : 0;
 
   return (
@@ -126,6 +149,23 @@ export default function MessageMeta({ message, isStreaming = false }) {
               <ArrowUp size={11} className="text-sky-400/80" />
               {formatTokens((usage.inputTokens || 0) + (visionUsage?.inputTokens || 0))}
             </span>
+            {/* On the pill, not only in the hover card: a cache hit is the main
+                reason a long chat costs less than its token count suggests, and it
+                is invisible if you have to know to hover to find it. */}
+            {cachedTokens > 0 && (
+              <span
+                className="flex items-center gap-1 text-emerald-400/80"
+                title={
+                  hasCacheRate
+                    ? `${formatTokensFull(cachedTokens)} of the input was served from the provider's cache, billed at the cheaper cached rate`
+                    : `${formatTokensFull(cachedTokens)} of the input was cached by the provider, but this model has no cached-input price set — billed at the full rate. Set it in the admin Models editor to see the real saving.`
+                }
+              >
+                <Zap size={11} />
+                {formatTokens(cachedTokens)} cached
+                {!hasCacheRate && <span className="text-amber-400/80">*</span>}
+              </span>
+            )}
             <span className="flex items-center gap-1" title="Output tokens">
               <ArrowDown size={11} className="text-violet-400/80" />
               {formatTokens((usage.outputTokens || 0) + (visionUsage?.outputTokens || 0))}

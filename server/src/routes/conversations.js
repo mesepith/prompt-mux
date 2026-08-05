@@ -600,11 +600,15 @@ router.post('/:id/messages', async (req, res, next) => {
       if (!items.length) return null;
       const add = (key) => items.reduce((n, u) => n + (u[key] || 0), 0);
       const reasoning = add('reasoningTokens');
+      const cached = add('cachedInputTokens');
       const input = add('inputTokens');
       const output = add('outputTokens');
       return {
         inputTokens: input,
         outputTokens: output,
+        // Summed like the rest: a repair call re-reads the same prefix, so its hit
+        // belongs to the same turn's bill.
+        ...(cached ? { cachedInputTokens: cached } : {}),
         // max, not `||`: when one call reports totalTokens and another doesn't,
         // summing the reported ones alone is a truthy UNDERCOUNT, and the cost
         // shown to the user would be less than the turn actually spent.
@@ -726,17 +730,37 @@ router.post('/:id/messages', async (req, res, next) => {
       // The live source rides on the user's own message, like PDF and doc text
       // does — it is per-turn content, and that is where the model looks for what
       // it was just asked about.
+      //
+      // It goes at the FRONT, before the user's words, for two reasons. Prompt
+      // caching only ever reuses a PREFIX, so anything placed after the question
+      // can never be cached — and the question is the one part that changes every
+      // turn. Putting the stable source first means a turn that doesn't edit the
+      // artifact (a question, or the repair call) re-reads it at the cache rate.
+      // Recency also favours it: the instruction ends up last, where models follow
+      // it best.
       if (patchMode) {
         const lastUser = providerMessages[providerMessages.length - 1];
-        lastUser.content = `${lastUser.content}\n\n${buildArtifactContext({
+        lastUser.content = `${buildArtifactContext({
           code: liveArtifact.code,
           language: liveArtifact.language,
           title: liveArtifact.title,
           outline: renderArtifactMap(buildArtifactMap(liveArtifact.code)),
-        })}`.trim();
+        })}\n\n${lastUser.content}`.trim();
       }
 
-      const system = patchMode ? `${SYSTEM_PROMPT}\n${PATCH_RULES}` : SYSTEM_PROMPT;
+      // End of the reusable prefix: everything up to and including the previous
+      // turn. Anthropic caches nothing without this marker (every OpenAI-compatible
+      // vendor does it automatically); other adapters ignore the flag. Placed
+      // before the newest message because that is the part that is byte-identical
+      // next turn — which is where the 53% of re-sent input tokens goes.
+      if (providerMessages.length >= 3) {
+        providerMessages[providerMessages.length - 2].cacheBoundary = true;
+      }
+
+      // Always the same string, whether or not this chat has an artifact — see the
+      // note in config/patchPrompt.js. A system prompt that grows mid-chat moves the
+      // first bytes of the prompt and throws away the whole prompt cache.
+      const system = `${SYSTEM_PROMPT}\n${PATCH_RULES}`;
       const calls = [];
 
       // Tokens go out live until the reply turns into edit blocks; from there the
@@ -849,7 +873,10 @@ router.post('/:id/messages', async (req, res, next) => {
         const rewrite = await streamChat({
           model,
           messages: rewriteMessages,
-          system: SYSTEM_PROMPT, // no patch rules: this time we do want the document
+          // Same system prompt as every other call, so the cached prefix still
+          // matches. The "output the complete document" instruction that overrides
+          // the patch rules travels with the message instead (rewrite: true above).
+          system,
           signal: controller.signal,
           onToken: (delta) => {
             if (!clientGone) send({ type: 'token', content: delta });

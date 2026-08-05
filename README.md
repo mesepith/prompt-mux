@@ -28,6 +28,13 @@ live previews.
   Flip it back off and the link stops working for everyone else. Each version of an
   artifact keeps its own link, so a page you sent someone doesn't change under them when
   you keep editing.
+- **Prompt caching, and honest cache accounting** — in a long chat most of what you pay for is
+  the history being re-sent (measured on a real chat here: 53% of all input tokens). Providers
+  discount that heavily, so the app now reads each vendor's cache-hit count back, prices it at
+  the model's `cachedIn` rate, and shows **Input (new)** and **Input (cached)** as separate
+  lines in the token breakdown. Anthropic models are asked to cache explicitly (nobody else
+  needs asking). Without this the dashboard billed already-cached tokens at full price — on an
+  80%-cached turn that overstated the cost by ~58%.
 - **Fixes don't rewrite the file** — ask for a change in the chat ("make the jump higher",
   "the ball goes through the wall") and the model replies with just the lines that change,
   which the server finds and splices. On a real 618-line game a fix went from ~5,200 output

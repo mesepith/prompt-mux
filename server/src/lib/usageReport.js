@@ -34,15 +34,28 @@ export function costOfCall(modelId, tokens, priceOf) {
   const price = modelId ? priceOf(modelId) : null;
   const inTok = num(tokens?.inputTokens);
   const outTok = num(tokens?.outputTokens);
+  // Cache hits are a SUBSET of inputTokens (the adapters normalize every vendor's
+  // shape to that), so they are split OUT of the full-price half rather than added.
+  // Clamped: a provider reporting a hit bigger than the prompt must not produce a
+  // negative bill.
+  const cachedTok = Math.min(num(tokens?.cachedInputTokens), inTok);
+  const fullTok = inTok - cachedTok;
   const hasPrice = price && typeof price.in === 'number' && typeof price.out === 'number';
+  // No cachedIn rate means bill the hits at the full rate: overstating a bill is
+  // safe, inventing a discount the vendor never gave is not.
+  const cachedRate = price && typeof price.cachedIn === 'number' ? price.cachedIn : price?.in;
   return {
     modelId: modelId || null,
     inputTokens: inTok,
     outputTokens: outTok,
+    // Reported, never re-billed: it is a subset of inputTokens.
+    cachedInputTokens: cachedTok,
     // Reported, never re-billed: it is a subset of outputTokens.
     reasoningTokens: num(tokens?.reasoningTokens),
     totalTokens: num(tokens?.totalTokens) || inTok + outTok,
-    costUsd: hasPrice ? round6((inTok * price.in + outTok * price.out) / 1e6) : null,
+    costUsd: hasPrice
+      ? round6((fullTok * price.in + cachedTok * cachedRate + outTok * price.out) / 1e6)
+      : null,
     priced: Boolean(hasPrice),
   };
 }
@@ -94,6 +107,10 @@ export function rollUp(groups, priceOf) {
     byModel: byModel.sort((a, b) => (b.costUsd || 0) - (a.costUsd || 0) || b.totalTokens - a.totalTokens),
     messages: byModel.reduce((s, m) => s + (m.kind === 'chat' ? m.messages : 0), 0),
     inputTokens: byModel.reduce((s, m) => s + m.inputTokens, 0),
+    // Subset of inputTokens. Surfaced so the dashboard can show how much of the
+    // spend prompt caching is already absorbing — it is the difference between
+    // "our bill is growing" and "our bill is growing but 60% of it is cached".
+    cachedInputTokens: byModel.reduce((s, m) => s + m.cachedInputTokens, 0),
     outputTokens: byModel.reduce((s, m) => s + m.outputTokens, 0),
     reasoningTokens: byModel.reduce((s, m) => s + m.reasoningTokens, 0),
     totalTokens: byModel.reduce((s, m) => s + m.totalTokens, 0),

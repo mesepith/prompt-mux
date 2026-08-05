@@ -3,6 +3,8 @@
  * includes a self-contained HTML artifact so you can test streaming and the
  * artifact panel end-to-end before adding real provider keys.
  */
+import { END_OF_SOURCE } from '../config/patchPrompt.js';
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const DEMO_REPLY = `Here's a quick demo of what PromptMux artifacts look like — an interactive glow card, generated as a self-contained HTML artifact. Click the **preview** on the right!
@@ -121,8 +123,11 @@ function demoPatchReply(messages) {
 
   // A real model decides from the prompt whether the user wants a change or an
   // answer. The demo has to fake that judgement, or an offline test of "what does
-  // this do?" would come back as an edit and misrepresent the feature.
-  const asked = text.slice(0, at).trim();
+  // this do?" would come back as an edit and misrepresent the feature. The source
+  // is inlined before the user's words, so the request is whatever follows the
+  // end-of-source line.
+  const afterSource = text.split(END_OF_SOURCE);
+  const asked = (afterSource.length > 1 ? afterSource[afterSource.length - 1] : '').trim();
   if (/\?\s*$/.test(asked) || /^(what|why|how|when|where|which|who|is|are|does|do|can|could|should)\b/i.test(asked))
     return null;
 

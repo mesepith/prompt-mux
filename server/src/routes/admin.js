@@ -838,6 +838,8 @@ router.get(
             messages: { $sum: 1 },
             inputTokens: { $sum: { $ifNull: ['$usage.inputTokens', 0] } },
             outputTokens: { $sum: { $ifNull: ['$usage.outputTokens', 0] } },
+            // A subset of inputTokens, billed at price.cachedIn — see below.
+            cachedInputTokens: { $sum: { $ifNull: ['$usage.cachedInputTokens', 0] } },
           },
         },
       ]),
@@ -866,8 +868,19 @@ router.get(
       const model = getModel(row._id);
       const company = model ? getCompany(model.company) : null;
       const priced = Boolean(model?.price);
+      // Cache hits are a subset of inputTokens, so they are split OUT and billed at
+      // price.cachedIn (a tenth of price.in on most vendors). Pricing the whole
+      // input at the full rate is what made this dashboard overstate every long
+      // chat — on an 80%-cached turn, by ~58%.
+      const cachedTok = Math.min(row.cachedInputTokens || 0, row.inputTokens);
+      const fullTok = row.inputTokens - cachedTok;
+      const cachedRate =
+        priced && typeof model.price.cachedIn === 'number' ? model.price.cachedIn : model?.price?.in;
       const costUsd = priced
-        ? (model.price.in * row.inputTokens + model.price.out * row.outputTokens) / 1e6
+        ? (model.price.in * fullTok +
+            cachedRate * cachedTok +
+            model.price.out * row.outputTokens) /
+          1e6
         : 0;
       return {
         modelId: row._id,
@@ -875,6 +888,7 @@ router.get(
         companyName: company?.name || model?.company || 'Unknown',
         messages: row.messages,
         inputTokens: row.inputTokens,
+        cachedInputTokens: cachedTok,
         outputTokens: row.outputTokens,
         costUsd: round6(costUsd),
         priced,
@@ -2027,6 +2041,7 @@ async function usageByOwner(match) {
           _id: { userId: '$userId', sessionId: '$sessionId', modelId: '$modelId' },
           messages: { $sum: 1 },
           inputTokens: { $sum: { $ifNull: ['$usage.inputTokens', 0] } },
+          cachedInputTokens: { $sum: { $ifNull: ['$usage.cachedInputTokens', 0] } },
           outputTokens: { $sum: { $ifNull: ['$usage.outputTokens', 0] } },
           reasoningTokens: { $sum: { $ifNull: ['$usage.reasoningTokens', 0] } },
           totalTokens: { $sum: { $ifNull: ['$usage.totalTokens', 0] } },
