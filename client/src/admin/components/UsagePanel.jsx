@@ -222,11 +222,22 @@ function IpCell({ ips, count, fallback }) {
   );
 }
 
-function TokenCells({ input, output, reasoning, total }) {
+function TokenCells({ input, cached, output, reasoning, total }) {
+  const share = input > 0 && cached > 0 ? Math.round((cached / input) * 100) : 0;
   return (
     <>
       <Td align="right" className="tabular-nums text-zinc-400">
         {num(input)}
+      </Td>
+      {/* Part of Input, not on top of it — billed at the model's cached rate. Shown
+          in every table (people, chats, messages) because "why did this cost that
+          much" is asked at all three levels. */}
+      <Td
+        align="right"
+        className={clsx('tabular-nums', cached > 0 ? 'text-emerald-400/80' : 'text-zinc-600')}
+        title={cached > 0 ? `${share}% of the input was served from the provider's cache` : 'no cache hits'}
+      >
+        {cached > 0 ? num(cached) : '—'}
       </Td>
       <Td align="right" className="tabular-nums text-zinc-400">
         {num(output)}
@@ -337,6 +348,7 @@ function PeopleLevel({ usage, onOpen }) {
                   </span>
                 </Th>
                 <Th align="right">Input</Th>
+                <Th align="right" title="Part of Input, billed at the cached rate">Cached</Th>
                 <Th align="right">Output</Th>
                 <Th align="right">Reasoning</Th>
                 <Th align="right">Total tokens</Th>
@@ -385,6 +397,7 @@ function PeopleLevel({ usage, onOpen }) {
                     </Td>
                     <TokenCells
                       input={row.inputTokens}
+                      cached={row.cachedInputTokens}
                       output={row.outputTokens}
                       reasoning={row.reasoningTokens}
                       total={row.totalTokens}
@@ -461,6 +474,7 @@ function ChatsLevel({ owner, ownerKey, chatsRes, windowed, onOpen }) {
                 <Th>Chat</Th>
                 <Th align="right">Messages</Th>
                 <Th align="right">Input</Th>
+                <Th align="right" title="Part of Input, billed at the cached rate">Cached</Th>
                 <Th align="right">Output</Th>
                 <Th align="right">Reasoning</Th>
                 <Th align="right">Total</Th>
@@ -513,6 +527,7 @@ function ChatsLevel({ owner, ownerKey, chatsRes, windowed, onOpen }) {
                     </Td>
                     <TokenCells
                       input={chat.inputTokens}
+                      cached={chat.cachedInputTokens}
                       output={chat.outputTokens}
                       reasoning={chat.reasoningTokens}
                       total={chat.totalTokens}
@@ -671,6 +686,7 @@ function MessageRows({ message }) {
           <>
             <TokenCells
               input={message.chat.inputTokens}
+              cached={message.chat.cachedInputTokens}
               output={message.chat.outputTokens}
               reasoning={message.chat.reasoningTokens}
             />
@@ -727,6 +743,7 @@ function MessageRows({ message }) {
           </Td>
           <TokenCells
             input={message.vision.inputTokens}
+            cached={message.vision.cachedInputTokens}
             output={message.vision.outputTokens}
             reasoning={message.vision.reasoningTokens}
           />
@@ -824,6 +841,7 @@ function MessagesLevel({ chatRes }) {
                 <Th>Role</Th>
                 <Th>Model</Th>
                 <Th align="right">Input</Th>
+                <Th align="right" title="Part of Input, billed at the cached rate">Cached</Th>
                 <Th align="right">Output</Th>
                 <Th align="right">Reasoning</Th>
                 <Th align="right">Cost</Th>

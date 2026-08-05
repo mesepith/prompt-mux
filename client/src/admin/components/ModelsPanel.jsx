@@ -252,6 +252,9 @@ export default function ModelsPanel() {
                 <Th>Model</Th>
                 <Th>API model</Th>
                 <Th align="right">Input $/1M</Th>
+                <Th align="right" title="Price for input the provider served from its prompt cache. Empty means cache hits are billed at the full input price, which overstates long chats.">
+                  Cached in $/1M
+                </Th>
                 <Th align="right">Output $/1M</Th>
                 <Th align="right">Context</Th>
                 <Th>Caps</Th>
@@ -315,6 +318,23 @@ export default function ModelsPanel() {
                           </Td>
                           <Td align="right">
                             <PriceCell model={model} />
+                          </Td>
+                          {/* Blank is not "free" here, it is "unknown" — and an
+                              unknown cache rate means hits get billed at the full
+                              input price. Flagged rather than left as a bare dash. */}
+                          <Td
+                            align="right"
+                            className={clsx(
+                              'tabular-nums',
+                              typeof price.cachedIn === 'number' ? 'text-emerald-300/90' : 'text-zinc-600'
+                            )}
+                            title={
+                              typeof price.cachedIn === 'number'
+                                ? `Cache hits cost ${Math.round((price.in || 0) / (price.cachedIn || 1))}x less than fresh input`
+                                : 'Not set — cache hits are billed at the full input price. Fetch Prices can usually find it, or set it in Edit.'
+                            }
+                          >
+                            {typeof price.cachedIn === 'number' ? formatPrice(price.cachedIn) : 'not set'}
                           </Td>
                           <Td align="right" className="tabular-nums text-zinc-200">
                             {formatPrice(price.out)}
