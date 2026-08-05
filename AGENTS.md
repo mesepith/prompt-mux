@@ -98,6 +98,19 @@ private URL (never `/admin` — see the routing rules below).
     `ProposalDrawer` leaves them unchecked — counting rows regardless of `applied`, so a
     leftover row can't look like the only candidate after a partial apply. Keep all three:
     each covers a case the others don't.
+  - **A reply that stops mid-JSON is diagnosed as such, and its whole rows are kept.**
+    `balancedFrom` returns null for an unclosed outer object, so it never becomes a
+    candidate; the scan then walks forward, parses the first complete ROW object, finds no
+    `items` key on it and used to report *"the model's reply had no items array"*. That
+    happened on a live OpenAI fetch whose answer was word-perfect as far as it got, and the
+    message sent the reader hunting the prompt and the extractor for a fault in neither.
+    `looksTruncated` now names the real cause and `salvageTruncatedItems` recovers every
+    complete row before the cut (the partial one is dropped), with a warning that the page
+    may hold prices this run never reported — a fetch is a paid call over a page of tens of
+    thousands of characters, so losing all of it to a missing brace is the wrong trade.
+    Distinguish the three cases when touching this: truncated, valid-but-rowless, and
+    genuinely malformed JSON each get their own message, and `priceExtract.test.js` pins all
+    three.
   - Two things learned the hard way about the fetch itself. The request sends
     `Accept-Language: en-US,en;q=0.9`, because without it a CDN serves the caller's locale
     and Google's pricing page arrives in French, where `1,50 $` reads as 150 to anything

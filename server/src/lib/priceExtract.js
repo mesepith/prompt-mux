@@ -184,6 +184,56 @@ function balancedFrom(text, start) {
 const MAX_CANDIDATES = 5;
 
 /**
+ * True when the reply's outermost `{`/`[` never closes — i.e. the model stopped
+ * mid-JSON, because it hit an output cap or the call was aborted.
+ *
+ * Worth its own check because of how it USED to be reported. `balancedFrom`
+ * returns null for the unclosed outer object, so it never becomes a candidate;
+ * the scan then walks forward, finds the first complete row object inside the
+ * array, parses that happily, sees no `items` key on it and reported "the
+ * model's reply had no items array". Observed for real on a live OpenAI price
+ * fetch whose reply was word-perfect as far as it got. The message sent whoever
+ * read it hunting the extractor or the prompt, when the truth was "the answer
+ * was cut off — run it again".
+ */
+function looksTruncated(text) {
+  const first = text.search(/[[{]/);
+  return first !== -1 && balancedFrom(text, first) === null;
+}
+
+/**
+ * Rows recovered from a reply that stopped mid-JSON.
+ *
+ * A cut-off reply is still mostly good: every row before the cut is complete and
+ * self-contained. A price fetch is a paid call against a page that can be tens of
+ * thousands of characters, so throwing all of that away over a missing `}` — and
+ * charging for it again on the retry — is the wrong trade. The partial row at the
+ * cut is dropped (balancedFrom won't close it), and the caller warns that rows may
+ * be missing, so an admin never mistakes a partial read for the whole page.
+ */
+function salvageTruncatedItems(text) {
+  const key = text.search(/"items"\s*:\s*\[/);
+  const from = key === -1 ? text.search(/^\s*\[/) : text.indexOf('[', key);
+  if (from === -1) return null;
+
+  const items = [];
+  let i = from + 1;
+  while (items.length < MAX_ITEMS) {
+    const open = text.indexOf('{', i);
+    if (open === -1) break;
+    const slice = balancedFrom(text, open);
+    if (!slice) break; // the row the cut landed in
+    try {
+      items.push(JSON.parse(slice));
+    } catch {
+      break;
+    }
+    i = open + slice.length;
+  }
+  return items.length ? items : null;
+}
+
+/**
  * Every top-level balanced `{...}` / `[...]` in the reply, in order, so a code
  * fence or a sentence of "here are the prices [from that page]" doesn't cost us
  * the whole run — the caller takes the first candidate that actually parses
@@ -273,8 +323,17 @@ function buildItem(rawItem, index, warnings) {
  * as an empty proposal the admin can read a reason off, not as a 500.
  */
 export function parsePriceReply(raw) {
-  const candidates = jsonCandidates(String(raw ?? ''));
-  if (!candidates.length) return { items: [], warnings: ['The model returned no JSON at all — nothing to review.'] };
+  const text = String(raw ?? '');
+  const candidates = jsonCandidates(text);
+  const truncated = looksTruncated(text);
+  const cutOff =
+    'The model\'s reply was cut off before the JSON closed, so this page was only partly read — run the fetch again.';
+  if (!candidates.length) {
+    return {
+      items: [],
+      warnings: [truncated ? cutOff : 'The model returned no JSON at all — nothing to review.'],
+    };
+  }
 
   let parsed = null;
   let rawItems = null;
@@ -295,18 +354,30 @@ export function parsePriceReply(raw) {
     }
     parsed ??= value; // parsed but rowless — kept so the warning can say which failure this was
   }
+  // A cut-off reply reaches here with `parsed` set to the first complete ROW
+  // object (which has no `items` key), so it must be diagnosed before that is
+  // mistaken for a reply that genuinely listed no rows.
+  const recovered = truncated && !rawItems ? salvageTruncatedItems(text) : null;
+  const salvageNote = recovered
+    ? `The model's reply was cut off before it finished. ${recovered.length} complete row(s) were recovered; the page may list more prices that this run never reported — re-fetch to be sure.`
+    : null;
+  if (recovered) rawItems = recovered;
+
   if (!rawItems) {
     return {
       items: [],
       warnings: [
-        parsed
-          ? 'The model\'s reply had no "items" array.'
-          : trunc(`The model's reply was not valid JSON: ${parseError.message}`, MAX_TEXT),
+        truncated
+          ? cutOff
+          : parsed
+            ? 'The model\'s reply had no "items" array.'
+            : trunc(`The model's reply was not valid JSON: ${parseError.message}`, MAX_TEXT),
       ],
     };
   }
 
   const warnings = [];
+  if (salvageNote) warnings.push(salvageNote);
   if (Array.isArray(parsed?.warnings)) {
     for (const w of parsed.warnings.slice(0, MAX_WARNINGS)) {
       if (typeof w === 'string' && w.trim()) warnings.push(trunc(w.trim(), MAX_TEXT));

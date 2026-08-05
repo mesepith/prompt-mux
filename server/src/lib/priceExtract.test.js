@@ -153,6 +153,84 @@ test('reports a reply with no items array', () => {
   assert.match(warnings[0], /no "items" array/);
 });
 
+// --- a reply that stopped mid-JSON --------------------------------------
+//
+// Seen for real on a live OpenAI price fetch: the model's answer was correct as
+// far as it got, but the reply was cut off, and the extractor reported "the
+// model's reply had no items array" — because the unclosed outer object is not a
+// balanced candidate, so the scan latched onto the first complete ROW instead,
+// which of course has no `items` key. That message sent the reader hunting the
+// prompt and the extractor for a fault that was neither.
+
+const cutOff = (items, dropChars) => {
+  const full = reply(items);
+  return full.slice(0, full.length - dropChars);
+};
+
+test('a cut-off reply is named as cut off, not as "no items array"', () => {
+  const { items, warnings } = parsePriceReply(cutOff([row({ evidence: 'x'.repeat(120) })], 150));
+  assert.deepEqual(items, []);
+  assert.match(warnings[0], /cut off/i);
+  assert.equal(/no "items" array/.test(warnings[0]), false, 'the misleading message is gone');
+});
+
+test('complete rows before the cut are recovered rather than thrown away', () => {
+  // A paid fetch over a 20k-character page should not be lost to a missing brace.
+  const raw = cutOff(
+    [
+      row({ modelSlug: 'gpt-5', inPrice: 1.25, outPrice: 10, cachedInPrice: 0.125 }),
+      row({ modelSlug: 'claude-sonnet', inPrice: 3, outPrice: 15, cachedInPrice: 0.3 }),
+      row({ modelSlug: 'gemini-flash', inPrice: 0.3, outPrice: 2.5 }),
+    ],
+    120
+  );
+  const { items, warnings } = parsePriceReply(raw);
+  assert.equal(items.length, 2, 'the two whole rows survive; the partial one is dropped');
+  assert.deepEqual(items.map((i) => i.modelSlug), ['gpt-5', 'claude-sonnet']);
+  assert.equal(items[0].cachedInPrice, 0.125, 'recovered rows keep their cache price');
+  assert.equal(items[1].cachedInPrice, 0.3);
+  assert.match(warnings[0], /cut off/i);
+  assert.match(warnings[0], /2 complete row/);
+  assert.match(warnings[0], /may list more prices/, 'a partial read must not read as a whole one');
+});
+
+test('a cut-off bare array (no "items" key) is recovered too', () => {
+  const full = JSON.stringify([row({ modelSlug: 'gpt-5' }), row({ modelSlug: 'claude-sonnet' })]);
+  const { items, warnings } = parsePriceReply(full.slice(0, full.length - 100));
+  assert.equal(items.length, 1);
+  assert.match(warnings[0], /cut off/i);
+});
+
+test('a row containing nested objects is recovered whole, not at its first brace', () => {
+  const nested = row({ modelSlug: 'gpt-5', meta: { tier: { name: 'standard' } }, inPrice: 7 });
+  const full = reply([nested, row({ modelSlug: 'claude-sonnet' })]);
+  const { items } = parsePriceReply(full.slice(0, full.length - 90));
+  assert.equal(items.length, 1);
+  assert.equal(items[0].modelSlug, 'gpt-5');
+  assert.equal(items[0].inPrice, 7, 'the nested object did not truncate the row');
+});
+
+test('a cut-off reply with nothing complete yet still says cut off', () => {
+  const { items, warnings } = parsePriceReply('{"items": [{"modelSlug": "gpt-5", "inPr');
+  assert.deepEqual(items, []);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /cut off/i);
+});
+
+test('a COMPLETE reply gains no cut-off warning', () => {
+  const { items, warnings } = parsePriceReply(reply([row(), row({ modelSlug: 'gpt-5' })]));
+  assert.equal(items.length, 2);
+  assert.equal(warnings.some((w) => /cut off/i.test(w)), false);
+});
+
+test('genuinely broken JSON is still reported as broken, not as cut off', () => {
+  // Balanced braces, so this is a syntax error rather than a truncation.
+  const { items, warnings } = parsePriceReply('{"items": [oops]}');
+  assert.deepEqual(items, []);
+  assert.equal(/cut off/i.test(warnings[0]), false);
+  assert.match(warnings[0], /not valid JSON|no "items" array/);
+});
+
 test('tolerates a bare array of rows', () => {
   const { items } = parsePriceReply(JSON.stringify([row()]));
   assert.equal(items.length, 1);
