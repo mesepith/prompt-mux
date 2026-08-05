@@ -13,7 +13,24 @@ import { SYSTEM_PROMPT } from '../config/systemPrompt.js';
 import { EDIT_SYSTEM_PROMPT, buildEditPrompt, cleanFragment, rootTag } from '../config/editPrompt.js';
 import { streamChat, describeImages } from '../providers/index.js';
 import { editFragment as demoEditFragment } from '../providers/demo.js';
-import { extractArtifacts, artifactFence, summarizeArtifactFences } from '../lib/artifacts.js';
+import {
+  extractArtifacts,
+  artifactFence,
+  summarizeArtifactFences,
+  deriveTitle,
+  MIN_ARTIFACT_CHARS,
+} from '../lib/artifacts.js';
+import {
+  parsePatch,
+  applyPatch,
+  patchStats,
+  hunksForStorage,
+  describeFailures,
+  patchMarkerIndex,
+  SNIFF_HOLDBACK,
+} from '../lib/patch.js';
+import { buildArtifactMap, renderArtifactMap } from '../lib/artifactMap.js';
+import { PATCH_RULES, buildArtifactContext, buildRepairPrompt } from '../config/patchPrompt.js';
 import { validateImageDataUrl, MAX_IMAGES } from '../lib/images.js';
 import { renderPdfPagesToImages } from '../lib/pdfImages.js';
 import {
@@ -38,6 +55,11 @@ import { clientIp } from '../lib/clientIp.js';
 const router = Router();
 
 const ANONYMOUS_MESSAGE_LIMIT = Number(process.env.ANONYMOUS_MESSAGE_LIMIT) || 3;
+
+// A patched artifact still has to be readable back out of its own fence, so it
+// must clear the threshold extractArtifacts applies. Below it, the message would
+// look like it carried an artifact and carry none.
+const PATCH_LIMITS = { minLength: MIN_ARTIFACT_CHARS };
 
 function ownerId(req) {
   if (req.userId) return { userId: req.userId };
@@ -64,6 +86,27 @@ function messageOwner(conversation, req) {
   if (conversation?.userId) return { ...base, userId: conversation.userId };
   if (conversation?.sessionId) return { ...base, sessionId: conversation.sessionId };
   return { ...base, ...(ownerId(req) || {}) };
+}
+
+/**
+ * The artifact a chat message is about: the newest one in the conversation.
+ *
+ * Index 0 of the newest artifact-bearing message on purpose — that is exactly
+ * what the client opens in the panel (see the store's `finish`), so "fix the
+ * jump" edits the thing the user is actually looking at. Any role counts, so
+ * pasting HTML and then asking for a fix works too.
+ */
+function findLiveArtifact(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const found = extractArtifacts(messages[i].content)[0];
+    if (!found) continue;
+    return {
+      ...found,
+      messageId: messages[i]._id,
+      title: deriveTitle(found.language, found.code),
+    };
+  }
+  return null;
 }
 
 // GET /api/conversations — sidebar list, newest first.
@@ -531,7 +574,7 @@ router.post('/:id/messages', async (req, res, next) => {
     });
 
     // Helper: persist an assistant message (error or normal) and finish.
-    const finishWith = async ({ content: c = '', usage, visionUsage, error }) => {
+    const finishWith = async ({ content: c = '', usage, visionUsage, error, artifactEdit }) => {
       const message = await Message.create({
         conversationId: conversation._id,
         role: 'assistant',
@@ -540,10 +583,34 @@ router.post('/:id/messages', async (req, res, next) => {
         ...(usage ? { usage } : {}),
         ...(visionUsage ? { visionUsage } : {}),
         ...(error ? { error } : {}),
+        ...(artifactEdit ? { artifactEdit } : {}),
         ...owner,
       });
       send(error ? { type: 'error', error, message } : { type: 'done', message });
       res.end();
+    };
+
+    /**
+     * One turn can cost more than one model call (a patch, its repair, a
+     * fallback rewrite). Cost tracking is per message, so those add up — showing
+     * only the last call's usage would under-report what the turn actually spent.
+     */
+    const sumUsage = (calls) => {
+      const items = calls.filter(Boolean);
+      if (!items.length) return null;
+      const add = (key) => items.reduce((n, u) => n + (u[key] || 0), 0);
+      const reasoning = add('reasoningTokens');
+      const input = add('inputTokens');
+      const output = add('outputTokens');
+      return {
+        inputTokens: input,
+        outputTokens: output,
+        // max, not `||`: when one call reports totalTokens and another doesn't,
+        // summing the reported ones alone is a truthy UNDERCOUNT, and the cost
+        // shown to the user would be less than the turn actually spent.
+        totalTokens: Math.max(add('totalTokens'), input + output),
+        ...(reasoning ? { reasoningTokens: reasoning } : {}),
+      };
     };
 
     try {
@@ -606,14 +673,22 @@ router.post('/:id/messages', async (req, res, next) => {
       const usable = history.filter(
         (m) => (m.content && m.content.trim()) || m.attachments?.length
       );
-      // Point-and-edit appends a full copy of the artifact per edit. Keep the two
-      // most recent turns verbatim and summarize older edit copies, so a long
-      // editing session doesn't push the same document at the model ten times.
+
+      // The live artifact — the version the user is looking at, and the one a
+      // "fix the collision" message means. When there is one, its source is
+      // injected ONCE below and every copy in the history is summarized away, so
+      // the model sees exactly one version instead of one per edit round.
+      const liveArtifact = findLiveArtifact(usable);
+      const patchMode = Boolean(liveArtifact);
+
+      // No artifact to edit: keep the original rule (trim superseded point-edit
+      // copies, keep the last two turns verbatim) so nothing regresses.
       const keepFullFrom = usable.length - 2;
       const providerMessages = usable.map((m, idx) => {
         const isLast = idx === usable.length - 1;
-        const baseContent =
-          m.artifactEdit?.instruction && idx < keepFullFrom
+        const baseContent = patchMode
+          ? summarizeArtifactFences(m.content, 'current source is included with the latest message')
+          : m.artifactEdit?.instruction && idx < keepFullFrom
             ? summarizeArtifactFences(m.content)
             : m.content;
         const imageAtts = (m.attachments || []).filter((a) => a.kind !== 'pdf');
@@ -648,16 +723,181 @@ router.post('/:id/messages', async (req, res, next) => {
         lastUser.content = `${lastUser.content}\n\n[File understanding by ${vmName}]:\n${fileDescription}`.trim();
       }
 
+      // The live source rides on the user's own message, like PDF and doc text
+      // does — it is per-turn content, and that is where the model looks for what
+      // it was just asked about.
+      if (patchMode) {
+        const lastUser = providerMessages[providerMessages.length - 1];
+        lastUser.content = `${lastUser.content}\n\n${buildArtifactContext({
+          code: liveArtifact.code,
+          language: liveArtifact.language,
+          title: liveArtifact.title,
+          outline: renderArtifactMap(buildArtifactMap(liveArtifact.code)),
+        })}`.trim();
+      }
+
+      const system = patchMode ? `${SYSTEM_PROMPT}\n${PATCH_RULES}` : SYSTEM_PROMPT;
+      const calls = [];
+
+      // Tokens go out live until the reply turns into edit blocks; from there the
+      // turn shows a status instead, and `done` replaces it with the finished
+      // message. Without patchMode this is a plain pass-through, unchanged.
+      let raw = '';
+      let emitted = 0;
+      let sniffed = false;
+      const onToken = patchMode
+        ? (delta) => {
+            raw += delta;
+            if (clientGone || sniffed) return;
+            const marker = patchMarkerIndex(raw);
+            if (marker !== -1) {
+              sniffed = true;
+              if (marker > emitted) send({ type: 'token', content: raw.slice(emitted, marker) });
+              emitted = raw.length;
+              send({ type: 'status', content: 'Making a targeted edit…' });
+              return;
+            }
+            const safe = raw.length - SNIFF_HOLDBACK;
+            if (safe > emitted) {
+              send({ type: 'token', content: raw.slice(emitted, safe) });
+              emitted = safe;
+            }
+          }
+        : (delta) => {
+            if (!clientGone) send({ type: 'token', content: delta });
+          };
+      // The sniffer holds a few characters back; an ordinary answer needs them.
+      const flushHeldTokens = () => {
+        if (!clientGone && !sniffed && raw.length > emitted) {
+          send({ type: 'token', content: raw.slice(emitted) });
+          emitted = raw.length;
+        }
+      };
+
       const chatResult = await streamChat({
         model,
         messages: providerMessages,
-        system: SYSTEM_PROMPT,
+        system,
         signal: controller.signal,
-        onToken: (delta) => {
-          if (!clientGone) send({ type: 'token', content: delta });
+        onToken,
+      });
+      calls.push(chatResult.usage);
+
+      const parsed = patchMode ? parsePatch(chatResult.content) : { blocks: [], prose: '', problems: [] };
+      // A reply carrying a whole ```html document is a rewrite, whatever else is
+      // in it — take it at face value rather than mixing the two.
+      const rewroteInstead = parsed.blocks.length > 0 && extractArtifacts(chatResult.content).length > 0;
+
+      if (!parsed.blocks.length || rewroteInstead) {
+        // An answer, a question, or a full rewrite: exactly today's behaviour.
+        flushHeldTokens();
+        await finishWith({ content: chatResult.content, usage: sumUsage(calls), visionUsage });
+        return;
+      }
+
+      let applied = applyPatch(liveArtifact.code, parsed.blocks, PATCH_LIMITS);
+      let prose = parsed.prose;
+      let fallback = null;
+
+      // One repair attempt. A few hundred tokens against the thousands a full
+      // rewrite costs, so it is worth asking twice before giving up on the cheap
+      // path — and the model gets to see its own failed blocks.
+      if (!applied.ok) {
+        if (!clientGone) send({ type: 'status', content: "That edit didn't line up — trying once more…" });
+        const repair = await streamChat({
+          model,
+          messages: [
+            ...providerMessages,
+            { role: 'assistant', content: chatResult.content },
+            { role: 'user', content: buildRepairPrompt(describeFailures(applied.failures, parsed.problems)) },
+          ],
+          system,
+          signal: controller.signal,
+          onToken: () => {},
+        });
+        calls.push(repair.usage);
+        const retry = parsePatch(repair.content);
+        if (retry.blocks.length) {
+          const second = applyPatch(liveArtifact.code, retry.blocks, PATCH_LIMITS);
+          if (second.ok) {
+            applied = second;
+            prose = retry.prose || prose;
+            fallback = 'repair';
+          }
+        }
+      }
+
+      // Still nothing that applies: regenerate the document — which is what used
+      // to happen on every single fix. The user is told, because a turn that
+      // quietly spent thousands of output tokens should not be invisible.
+      if (!applied.ok) {
+        if (!clientGone) {
+          send({ type: 'reset' });
+          send({ type: 'status', content: 'Targeted edit failed — rewriting the whole artifact…' });
+        }
+        // Re-frame the source: this call must ask for the whole document, so the
+        // "change it with edit blocks, do not reproduce it" instruction has to go.
+        const rewriteMessages = providerMessages.slice(0, -1).concat({
+          ...providerMessages[providerMessages.length - 1],
+          content: `${text}\n\n${buildArtifactContext({
+            code: liveArtifact.code,
+            language: liveArtifact.language,
+            title: liveArtifact.title,
+            rewrite: true,
+          })}`.trim(),
+        });
+        const rewrite = await streamChat({
+          model,
+          messages: rewriteMessages,
+          system: SYSTEM_PROMPT, // no patch rules: this time we do want the document
+          signal: controller.signal,
+          onToken: (delta) => {
+            if (!clientGone) send({ type: 'token', content: delta });
+          },
+        });
+        calls.push(rewrite.usage);
+
+        // Safety net: a model that answers with edit blocks anyway shouldn't cost
+        // the user their artifact. If those blocks apply, take them — the turn
+        // ends up as the targeted edit it was trying to be all along.
+        const lastChance = parsePatch(rewrite.content);
+        const salvaged = lastChance.blocks.length
+          ? applyPatch(liveArtifact.code, lastChance.blocks, PATCH_LIMITS)
+          : { ok: false };
+        if (salvaged.ok) {
+          applied = salvaged;
+          prose = lastChance.prose || prose;
+          fallback = 'repair';
+        } else {
+          await finishWith({
+            content: rewrite.content,
+            usage: sumUsage(calls),
+            visionUsage,
+            artifactEdit: { instruction: text.slice(0, 2000), mode: 'patch', fallback: 'rewrite' },
+          });
+          return;
+        }
+      }
+
+      // Stored as an ordinary artifact message: a full ```html fence with the
+      // patched source. That is what keeps the artifact panel, point-and-edit
+      // offsets, published /a/<id> links and the version history in the
+      // transcript all working with no special case for patched artifacts.
+      const stats = patchStats(applied.applied);
+      const summary =
+        prose || `Updated the artifact — ${stats.hunks} change${stats.hunks === 1 ? '' : 's'}.`;
+      await finishWith({
+        content: `${summary}\n\n${artifactFence(liveArtifact.language, applied.code)}`,
+        usage: sumUsage(calls),
+        visionUsage,
+        artifactEdit: {
+          instruction: text.slice(0, 2000),
+          mode: 'patch',
+          sourceMessageId: liveArtifact.messageId,
+          hunks: hunksForStorage(applied.applied),
+          ...(fallback ? { fallback } : {}),
         },
       });
-      await finishWith({ content: chatResult.content, usage: chatResult.usage, visionUsage });
     } catch (err) {
       const errorMessage = err?.message || 'Generation failed';
       await finishWith({ error: clientGone ? 'Stopped by user' : errorMessage });

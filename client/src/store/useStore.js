@@ -612,6 +612,11 @@ export const useStore = create((set, get) => ({
             set({ statusText: ev.content });
           } else if (ev.type === 'token') {
             set((s) => ({ streamingContent: s.streamingContent + ev.content }));
+          } else if (ev.type === 'reset') {
+            // A targeted artifact edit was attempted and couldn't be applied, so
+            // the server is starting over with a full rewrite. Clear what the
+            // abandoned attempt already streamed, or the rewrite appends to it.
+            set({ streamingContent: '' });
           } else if (ev.type === 'done') {
             finish(ev.message);
             get().refreshAuth();

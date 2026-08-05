@@ -93,9 +93,86 @@ const VISION_REPLY = `**Demo Vision analysis** (offline placeholder — a real v
 
 > Configure a real vision model (e.g. GLM-4.6V-Flash, Gemini Flash, Kimi K3) in the image slot to get genuine image understanding.`;
 
+/**
+ * Offline stand-in for a chat-driven artifact edit.
+ *
+ * When the chat has a live artifact, the route injects its source into the user
+ * message and asks for SEARCH/REPLACE blocks (config/patchPrompt.js). There is no
+ * model here, so this makes a deterministic, clearly-labelled edit instead —
+ * enough to exercise parse → locate → splice → store → re-render with no keys,
+ * exactly like `editFragment` does for point-and-edit.
+ *
+ * Two escape hatches make the failure paths testable too, since they are the
+ * ones that are otherwise impossible to reach on purpose:
+ *   "demo:badpatch" in the message -> quote code that isn't there (repair, then
+ *                                     the full-rewrite fallback)
+ *   "demo:repair"   in the message -> miss once, then get it right on the repair
+ */
+function demoPatchReply(messages) {
+  const users = messages.filter((m) => m.role === 'user').map((m) => String(m.content || ''));
+  // The source rides on the message that asked for the change — which on a repair
+  // call is no longer the last one, since the repair prompt comes after it.
+  const text = [...users].reverse().find((m) => m.includes('Current source:')) || '';
+  const at = text.indexOf('Current source:');
+  if (at === -1) return null;
+  const source = text.slice(at + 'Current source:'.length).trim();
+  if (!source) return null;
+  const lastUser = users[users.length - 1] || '';
+
+  // A real model decides from the prompt whether the user wants a change or an
+  // answer. The demo has to fake that judgement, or an offline test of "what does
+  // this do?" would come back as an edit and misrepresent the feature.
+  const asked = text.slice(0, at).trim();
+  if (/\?\s*$/.test(asked) || /^(what|why|how|when|where|which|who|is|are|does|do|can|could|should)\b/i.test(asked))
+    return null;
+
+  // The fallback call asks for the whole document instead — hand back the canned
+  // artifact so the offline test exercises a genuine rewrite, not another patch.
+  if (/output the COMPLETE updated document/i.test(text)) return null;
+
+  const isRepair = /could not be applied/i.test(lastUser);
+  const wantsFailure = /demo:badpatch/i.test(text) || (/demo:repair/i.test(text) && !isRepair);
+  if (wantsFailure) {
+    return [
+      'Editing that for you.',
+      '',
+      '```patch',
+      '<<<<<<< SEARCH',
+      '  /* a line the demo provider knows is not in this document */',
+      '=======',
+      '  /* replaced */',
+      '>>>>>>> REPLACE',
+      '```',
+    ].join('\n');
+  }
+
+  // Any anchor will do as long as it is genuinely unique — the server refuses
+  // ambiguous matches, and a demo that trips that guard would just look broken.
+  const anchor = ['</style>', '</body>', '</html>'].find((candidate) => {
+    const first = source.indexOf(candidate);
+    return first !== -1 && source.indexOf(candidate, first + 1) === -1;
+  });
+  if (!anchor) return null;
+
+  return [
+    'Applied a targeted edit (demo provider — a real model would make the change you asked for).',
+    '',
+    '```patch',
+    '<<<<<<< SEARCH',
+    anchor,
+    '=======',
+    '  /* demo targeted edit — only these lines were touched */',
+    '  html { outline: 3px dashed #8b5cf6; outline-offset: -6px; }',
+    anchor,
+    '>>>>>>> REPLACE',
+    '```',
+  ].join('\n');
+}
+
 export async function streamChat({ apiModel, messages = [], signal, onToken }) {
   const isVision = apiModel === 'demo-vision';
-  const reply = isVision ? VISION_REPLY : DEMO_REPLY;
+  const patch = isVision ? null : demoPatchReply(messages);
+  const reply = isVision ? VISION_REPLY : patch || DEMO_REPLY;
 
   let content = '';
   // Stream word-by-word with small delays to simulate a real model.

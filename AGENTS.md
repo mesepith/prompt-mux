@@ -353,6 +353,49 @@ private URL (never `/admin` — see the routing rules below).
   `POST /api/conversations/:id/fork`; the original conversation ID is never reused for
   another user's messages. The client tracks `isOwner`/`shared` from the GET response to
   show/hide editor controls and to decide whether to fork before writing.
+- **Chat-driven patch edits** — the second surgical path, and the one that covers a game.
+  Point & edit only reaches clickable elements (`script`/`style` are NOT_PICKABLE), so every
+  "fix the collision" used to regenerate the whole document: measured on a real 618-line
+  artifact, ~5,200 output tokens per fix, plus one full copy per past version left in the
+  provider history. Now:
+  - When a chat has an artifact, `PATCH_RULES` (`config/patchPrompt.js`) is appended to
+    `SYSTEM_PROMPT` and the live source is injected ONCE into the last user message
+    (`buildArtifactContext`, same pattern as `pdfInjection`), with a numbered outline from
+    `lib/artifactMap.js`. Every artifact fence in the history is summarized away, so the
+    model sees exactly one version instead of one per edit round.
+  - The model answers with `<<<<<<< SEARCH / ======= / >>>>>>> REPLACE` blocks;
+    `lib/patch.js` locates and splices them. **Uniqueness is mandatory** — not found, or
+    found twice, is a refusal, because editing the wrong copy silently breaks a working
+    game. Matching falls back exact -> trailing-space -> indentation (re-indenting from the
+    mapping OBSERVED in the matched lines, not a guessed indent width), and application is
+    **all-or-nothing**: a half-applied edit is the one outcome with no recovery.
+  - Fallback chain: patch -> one repair call (the model sees its own failed blocks) -> a
+    full rewrite. The rewrite call must re-frame `buildArtifactContext({ rewrite: true })`;
+    leaving "do not reproduce it" in place is how a failed edit stores edit blocks as prose
+    with the artifact missing. `artifactEdit.fallback` records it so a turn that quietly
+    cost a rewrite is visible in the UI.
+  - The result is stored as an ordinary artifact message — prose plus a full ```html fence.
+    That is deliberate: the panel, point-and-edit offsets, published `/a/<id>` snapshots and
+    the version history in the transcript all keep working with no patch-specific cases.
+  - No blocks in the reply (a question, or a full rewrite) means today's behaviour exactly,
+    which is what keeps a model that ignores the format working.
+  - The SSE stream stops forwarding tokens at `patchMarkerIndex` (holding `SNIFF_HOLDBACK`
+    characters back so a split marker can't leak) — nobody should watch `<<<<<<< SEARCH`
+    scroll past. `reset` tells the client to drop an abandoned attempt before a rewrite.
+  - `sumUsage` adds up all the calls in a turn; a multi-call turn must not report only the
+    last one's tokens, and `totalTokens` must be a `Math.max` against input+output — summing
+    only the calls that reported it is a truthy undercount. `demo-artist` emits real patches
+    offline (`demo:badpatch` / `demo:repair` force the failure paths), so all four exits are
+    testable with no keys.
+  - **`applyPatch` is called with `{ minLength: MIN_ARTIFACT_CHARS }`.** Without it a patch
+    can shrink an artifact below the threshold `extractArtifacts` applies: the fence is still
+    stored, nothing reads it back, the panel goes blank, and the next turn silently edits the
+    PREVIOUS version. Keep the limit wherever a patched result gets stored.
+  - Known limitation: `findLiveArtifact` takes artifact index 0 of the newest artifact-bearing
+    message, so a reply carrying two artifacts always edits the first. The system prompt asks
+    for one, and a patch aimed at the other simply fails into the fallback chain — but if
+    multi-artifact replies ever become normal, the client should send the panel's active
+    messageId + index with the message instead.
 - **Point & edit** (surgical artifact editing) — the one invariant: *the model rewrites a
   fragment, the server splices it; nobody regenerates the document*.
   - `client/src/lib/htmlNodes.js` scans artifact source into elements with exact

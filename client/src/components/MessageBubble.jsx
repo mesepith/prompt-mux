@@ -4,6 +4,7 @@ import { useStore } from '../store/useStore.js';
 import { extractArtifacts } from '../lib/artifacts.js';
 import Markdown from './Markdown.jsx';
 import MessageMeta from './MessageMeta.jsx';
+import ArtifactDiff from './ArtifactDiff.jsx';
 
 function ArtifactCard({ artifact }) {
   const { openArtifact } = useStore();
@@ -132,9 +133,20 @@ export default function MessageBubble({ message, isStreaming = false }) {
   return (
     <div className="animate-fade-in">
       {edit && (
-        <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-violet-400/25 bg-violet-500/[0.08] px-2.5 py-1 text-[11px] font-medium text-violet-300">
+        <div
+          className={clsx(
+            'mb-2 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium',
+            // A fallback rewrite is worth flagging differently: the cheap path
+            // was tried and missed, so this turn cost a full regeneration.
+            edit.fallback === 'rewrite'
+              ? 'border-amber-400/25 bg-amber-500/[0.08] text-amber-300'
+              : 'border-violet-400/25 bg-violet-500/[0.08] text-violet-300'
+          )}
+        >
           <MousePointerClick size={11} />
-          Targeted edit
+          {edit.fallback === 'rewrite'
+            ? 'Full rewrite (targeted edit failed)'
+            : 'Targeted edit'}
           {edit.target && <code className="font-mono text-violet-200/80">{edit.target}</code>}
         </div>
       )}
@@ -163,6 +175,8 @@ export default function MessageBubble({ message, isStreaming = false }) {
           ) : null}
         </div>
       )}
+
+      {edit?.hunks?.length > 0 && <ArtifactDiff hunks={edit.hunks} fallback={edit.fallback} />}
 
       {artifacts.map((a, i) => (
         <ArtifactCard key={`${a.title}-${i}`} artifact={a} />

@@ -28,6 +28,15 @@ live previews.
   Flip it back off and the link stops working for everyone else. Each version of an
   artifact keeps its own link, so a page you sent someone doesn't change under them when
   you keep editing.
+- **Fixes don't rewrite the file** — ask for a change in the chat ("make the jump higher",
+  "the ball goes through the wall") and the model replies with just the lines that change,
+  which the server finds and splices. On a real 618-line game a fix went from ~5,200 output
+  tokens to ~70, everything outside the change stays byte-identical, and the transcript shows
+  a `+/−` diff of exactly what moved. Lines that can't be found — or that appear twice — are
+  refused rather than guessed at, so a working game is never half-edited; if the targeted
+  edit genuinely can't be made, it falls back to a full rewrite and tells you it did.
+  Unlike **Point & edit** below this works on `<script>` logic, which is where a game's bugs
+  actually live.
 - **Point & edit** — no more "please change the button" and getting a whole new page back.
   Hit the crosshair button in the artifact panel, click the heading/button/section you
   want, and a little box opens next to it: say what to change and **only that element's

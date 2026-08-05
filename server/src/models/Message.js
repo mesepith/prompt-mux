@@ -44,14 +44,24 @@ const messageSchema = new mongoose.Schema(
     },
     // Set when generation failed (bad API key, rate limit, ...).
     error: { type: String },
-    // Set on the message pair produced by point-and-edit (POST /artifact-edit):
-    // the user's instruction, the element it targeted, and the message whose
-    // artifact was edited. Used to badge the pair in the UI and to trim older
-    // edit copies out of provider history.
+    // Set on any assistant message that CHANGED an existing artifact rather than
+    // writing a new one, from either surgical path:
+    //   mode 'element' — point-and-edit (POST /artifact-edit); `target` is the
+    //                    clicked element's label.
+    //   mode 'patch'   — a plain chat message the model answered with
+    //                    SEARCH/REPLACE blocks (lib/patch.js); `hunks` are the
+    //                    blocks that were applied, which is what the transcript
+    //                    renders as a diff.
+    // `fallback` records that the cheap path did not work first time, so a turn
+    // that quietly cost a full rewrite is visible rather than invisible.
+    // The point-and-edit route also stamps this on its user message, to pair them.
     artifactEdit: {
       instruction: { type: String },
       target: { type: String },
       sourceMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
+      mode: { type: String, enum: ['element', 'patch'] },
+      hunks: [{ search: { type: String }, replace: { type: String } }],
+      fallback: { type: String, enum: ['repair', 'rewrite'] },
     },
     // Ownership. Mirrors the parent conversation's owner.
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', sparse: true, index: true },
