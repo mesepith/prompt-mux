@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, FileText, Image as ImageIcon, Paperclip, Square, X, FileType } from 'lucide-react';
+import { ArrowUp, FileText, Image as ImageIcon, Paperclip, Square, Table2, X, FileType } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store/useStore.js';
 import ModelPicker from './ModelPicker.jsx';
@@ -108,6 +108,26 @@ export default function Composer() {
                   </div>
                 );
               }
+              if (a.kind === 'sheet') {
+                return (
+                  <div
+                    key={i}
+                    className="group relative flex cursor-pointer items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] py-2 pl-2.5 pr-3 transition-colors hover:border-emerald-500/40 hover:bg-white/[0.07]"
+                    onClick={() => openAttachment(a)}
+                  >
+                    <Table2 size={15} className="shrink-0 text-emerald-400/80" />
+                    <span className="max-w-[140px] truncate text-xs text-zinc-300">{a.name}</span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); removeAttachment(i); }}
+                      className="absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full bg-zinc-700 text-zinc-200 shadow hover:bg-rose-500"
+                      title="Remove spreadsheet"
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                );
+              }
               if (a.kind === 'doc') {
                 return (
                   <div
@@ -210,7 +230,7 @@ export default function Composer() {
               ? 'Send a message to create your own copy of this shared chat…'
               : attachments.length
                 ? 'Ask about the attached file(s)…'
-                : 'Ask anything, or drag & drop images / PDFs / docs…'
+                : 'Ask anything — type, paste or drop images / PDFs / docs / sheets…'
           }
           className="max-h-[200px] w-full resize-none bg-transparent px-5 pb-2 pt-4 text-[15px] text-zinc-100 placeholder-zinc-500 outline-none"
         />
@@ -220,7 +240,7 @@ export default function Composer() {
             <input
               ref={fileRef}
               type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.doc,.docx"
+              accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.doc,.docx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,.xlsm,text/csv,.csv,.tsv"
               multiple
               className="hidden"
               onChange={(e) => {

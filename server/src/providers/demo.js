@@ -3,7 +3,7 @@
  * includes a self-contained HTML artifact so you can test streaming and the
  * artifact panel end-to-end before adding real provider keys.
  */
-import { END_OF_SOURCE } from '../config/patchPrompt.js';
+import { END_OF_SOURCE, SOURCE_HEADER, SOURCE_END } from '../config/patchPrompt.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -114,10 +114,11 @@ function demoPatchReply(messages) {
   const users = messages.filter((m) => m.role === 'user').map((m) => String(m.content || ''));
   // The source rides on the message that asked for the change — which on a repair
   // call is no longer the last one, since the repair prompt comes after it.
-  const text = [...users].reverse().find((m) => m.includes('Current source:')) || '';
-  const at = text.indexOf('Current source:');
-  if (at === -1) return null;
-  const source = text.slice(at + 'Current source:'.length).trim();
+  const text = [...users].reverse().find((m) => m.includes(SOURCE_HEADER)) || '';
+  const from = text.indexOf(SOURCE_HEADER);
+  const to = text.indexOf(SOURCE_END);
+  if (from === -1 || to === -1) return null;
+  const source = text.slice(from + SOURCE_HEADER.length, to).trim();
   if (!source) return null;
   const lastUser = users[users.length - 1] || '';
 

@@ -289,6 +289,29 @@ private URL (never `/admin` — see the routing rules below).
   (`conversation.visionModelId`, else first available vision model) — the description
   replaces `textContent` and the attachment is marked `scanned: true`. Use ONE pdf.js
   (pdfjs-dist) for everything: mixing in unpdf caused API/worker version conflicts.
+- **Spreadsheets** (`lib/sheet.js`, `kind: 'sheet'`) follow the doc/PDF contract — converted to
+  text at upload, binary never stored — with three deliberate departures:
+  - **No spreadsheet library, on purpose.** The upload cap does not bound memory: a valid
+    8 MB .xlsx expands to ~57 MB of sheet XML, and measured peak RSS was exceljs 723 MB /
+    SheetJS 521 MB / read-excel-file 432 MB against **62 MB** for the streaming scan here.
+    On a ~956 MB box shared with WordPress and MariaDB that is a one-request DoS against
+    other services. (`xlsx` on npm is separately disqualified: frozen at 0.18.5 with
+    prototype-pollution and ReDoS advisories patched only in builds npm cannot ship.)
+    Keep the `validate -> extract -> inject` seam so a library can replace it in one file.
+  - **Legacy `.xls` is rejected** with "re-save as .xlsx". Same trap as doc.js's macOS
+    `textutil` branch: the only good BIFF reader is the library we must not install.
+  - **ONE cap (`SHEET_MAX_CHARS`), no current/history pair.** The pdfInjection split is a
+    known cache-breaker (below); a grid is far bigger than a PDF's prose, so paying it twice
+    is worse. `sheetInjection` also cuts at a ROW boundary — doc.js and pdf.js both bare-slice,
+    which on a grid severs the last row mid-cell.
+  - Silent-corruption traps the tests pin: date serials (and the 1904 epoch, and the phantom
+    1900 leap day), percentages stored as 0.0913 but shown as 9.13%, leading zeros under a
+    `00000` format, big integers a float round-trip would mangle, hidden sheets/rows (skipped
+    AND disclosed — people hide salary rows), merged cells, and a self-closing `<c r="A2"/>`
+    swallowing the next cell.
+- **Attachments only ever set `images` when `kind === 'image'.`** Docs and sheets store text
+  and have no `dataUrl`, so an allow-all-but-pdf filter sent `images: [null]` for every Word
+  doc on a vision model.
 - **Artifacts** = fenced ```` ```html ```` / ```` ```svg ```` blocks in assistant content.
   Server nudges models to produce them via `config/systemPrompt.js`; client extracts
   them in `client/src/lib/artifacts.js` and previews in a sandboxed iframe
@@ -382,10 +405,27 @@ private URL (never `/admin` — see the routing rules below).
     `client/src/lib/usage.js#messageCost` and `server/src/lib/usageReport.js#costOfCall` —
     keep the two in step. No `cachedIn` rate means bill hits at the full rate: overstating is
     safe, inventing a discount the vendor never gave is not.
-  - **Caching only ever reuses a PREFIX.** That is why `buildArtifactContext` is prepended to
-    the user's message rather than appended — anything after the question can never be cached,
-    and the question is the one part that changes every turn. `END_OF_SOURCE` closes the block
-    so the request doesn't run into hundreds of lines of code.
+  - **Caching only ever reuses a PREFIX, so NOTHING VARIABLE MAY SIT ABOVE THE SOURCE.**
+    `buildArtifactContext` emits a fixed `SOURCE_HEADER`, then the source, then `SOURCE_END`,
+    then everything variable (title, line count, outline, the rewrite-vs-patch instruction),
+    then `END_OF_SOURCE` and the user's words. A targeted edit changes a handful of lines, so
+    the head of the document up to the first changed byte is byte-identical between versions —
+    this ordering is the only thing that puts that head where a cache can reach it. Verified on
+    the real 810-line game: consecutive turns share ~7,800 tokens, read at ~10%. An earlier
+    version opened with `… "My Game": HTML, 618 lines.` and that count alone moved the
+    divergence ~70 tokens in, so the whole ~5k-token source sat behind it and scored **0 hits**.
+    The failure is silent — the prompt reads fine and only the bill knows — so
+    `config/patchPrompt.test.js` pins the ordering. Providers' minimum cacheable prefix is
+    1,024 tokens (OpenAI GPT-5.6+, strict), 2,048–4,096 (Gemini), 512–4,096 (Anthropic by
+    tier), which is why the ~690-token prefix this used to produce could never hit anywhere.
+  - The **repair** call re-sends `providerMessages` verbatim, so within that one turn the
+    source really is identical — the boundary is moved onto the last message there so Anthropic
+    reads it back at 0.1x instead of paying twice in one turn.
+  - The **rewrite fallback** must build its message in the same order and from the same
+    composed content. It differs only in the instruction *after* the source, so the source
+    stays a shared prefix on the app's most expensive path; and it uses `composedUserContent`,
+    not the raw `text` — substituting `text` silently dropped the PDF/doc text and the vision
+    model's file description, asking for a rewrite while withholding what it was about.
   - Known cache-breaker, left alone deliberately: `pdfInjection` gives the LAST message
     `PDF_CURRENT_MAX_CHARS` and older ones `PDF_HISTORY_MAX_CHARS`, so a PDF message's text
     changes once it stops being last, invalidating the cache from there on. Fixing it would

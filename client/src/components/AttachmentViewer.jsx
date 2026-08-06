@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import { Download, FileText, X } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
+import SheetViewer from './SheetViewer.jsx';
 
 /** Convert a data URL to a blob URL — Safari/Chrome won't render data: URLs
  *  for PDFs in iframes, but blob URLs work reliably. */
@@ -62,7 +63,9 @@ export default function AttachmentViewer() {
     if (!dataUrl) return;
     const a = document.createElement('a');
     a.href = dataUrl;
-    a.download = name || (kind === 'pdf' ? 'document.pdf' : kind === 'doc' ? 'document.docx' : 'image');
+    a.download =
+      name ||
+      (kind === 'pdf' ? 'document.pdf' : kind === 'doc' ? 'document.docx' : kind === 'sheet' ? 'spreadsheet.xlsx' : 'image');
     a.click();
   };
 
@@ -73,7 +76,14 @@ export default function AttachmentViewer() {
     >
       <div className="flex items-center gap-3 px-4 py-3" onClick={(e) => e.stopPropagation()}>
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-200">
-          {name || (kind === 'pdf' ? 'document.pdf' : kind === 'doc' ? 'document' : 'image')}
+          {name ||
+            (kind === 'pdf'
+              ? 'document.pdf'
+              : kind === 'doc'
+                ? 'document'
+                : kind === 'sheet'
+                  ? 'spreadsheet'
+                  : 'image')}
         </span>
         {dataUrl && (
           <button
@@ -98,7 +108,9 @@ export default function AttachmentViewer() {
         className="flex min-h-0 flex-1 items-center justify-center p-4 pb-8"
         onClick={(e) => e.stopPropagation()}
       >
-        {kind === 'doc' ? (
+        {kind === 'sheet' ? (
+          <SheetViewer text={textContent} name={name} />
+        ) : kind === 'doc' ? (
           <iframe
             srcDoc={DOC_HTML_SHELL(textContent)}
             title={name || 'Document preview'}

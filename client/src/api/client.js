@@ -234,7 +234,7 @@ export const adminApi = {
  * POSTs a user message and consumes the SSE stream of the assistant reply.
  * Events: start | token | status | done | error — see server/routes/conversations.js.
  */
-export async function streamMessage({ conversationId, content, modelId, images, pdfs, docs, signal, onEvent }) {
+export async function streamMessage({ conversationId, content, modelId, images, pdfs, docs, sheets, signal, onEvent }) {
   const res = await fetch(`/api/conversations/${conversationId}/messages`, {
     method: 'POST',
     credentials: 'include',
@@ -245,6 +245,7 @@ export async function streamMessage({ conversationId, content, modelId, images, 
       ...(images?.length ? { images } : {}),
       ...(pdfs?.length ? { pdfs } : {}),
       ...(docs?.length ? { docs } : {}),
+      ...(sheets?.length ? { sheets } : {}),
     }),
     signal,
   });

@@ -16,11 +16,13 @@ const messageSchema = new mongoose.Schema(
     // PDFs store the extracted text (kind: 'pdf'), not the binary.
     attachments: [
       {
-        kind: { type: String, enum: ['image', 'pdf', 'doc'], default: 'image' },
+        kind: { type: String, enum: ['image', 'pdf', 'doc', 'sheet'], default: 'image' },
         dataUrl: { type: String },
         mimeType: { type: String },
         name: { type: String },
         pageCount: { type: Number },
+        // Spreadsheets: how many sheets the workbook had (see lib/sheet.js).
+        sheetCount: { type: Number },
         textContent: { type: String },
         // true when the PDF had no text layer and textContent came from a
         // vision model reading rendered page images

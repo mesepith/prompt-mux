@@ -48,6 +48,13 @@ import {
   DOC_CURRENT_MAX_CHARS,
   DOC_HISTORY_MAX_CHARS,
 } from '../lib/doc.js';
+import {
+  validateSheetDataUrl,
+  extractSheetText,
+  sheetInjection,
+  MAX_SHEETS,
+  SHEET_MAX_CHARS,
+} from '../lib/sheet.js';
 import { ownerFilter, ownsConversation } from '../middleware/auth.js';
 import { audit } from '../models/AuditLog.js';
 import { clientIp } from '../lib/clientIp.js';
@@ -467,14 +474,17 @@ router.post('/:id/messages', async (req, res, next) => {
     const images = Array.isArray(req.body?.images) ? req.body.images : [];
     const pdfs = Array.isArray(req.body?.pdfs) ? req.body.pdfs : [];
     const docs = Array.isArray(req.body?.docs) ? req.body.docs : [];
-    if ((!content || !content.trim()) && !images.length && !pdfs.length && !docs.length)
-      return res.status(400).json({ error: 'content, images, pdfs or docs are required' });
+    const sheets = Array.isArray(req.body?.sheets) ? req.body.sheets : [];
+    if ((!content || !content.trim()) && !images.length && !pdfs.length && !docs.length && !sheets.length)
+      return res.status(400).json({ error: 'content, images, pdfs, docs or sheets are required' });
     if (images.length > MAX_IMAGES)
       return res.status(400).json({ error: `Max ${MAX_IMAGES} images per message` });
     if (pdfs.length > MAX_PDFS)
       return res.status(400).json({ error: `Max ${MAX_PDFS} PDFs per message` });
     if (docs.length > MAX_DOCS)
       return res.status(400).json({ error: `Max ${MAX_DOCS} documents per message` });
+    if (sheets.length > MAX_SHEETS)
+      return res.status(400).json({ error: `Max ${MAX_SHEETS} spreadsheets per message` });
     for (const url of images) {
       const invalid = validateImageDataUrl(url);
       if (invalid) return res.status(400).json({ error: invalid });
@@ -499,6 +509,26 @@ router.post('/:id/messages', async (req, res, next) => {
         });
       } catch (err) {
         return res.status(400).json({ error: `Could not read "${d.name}" — ${err.message}` });
+      }
+    }
+
+    // Spreadsheets become text at upload time and the binary is never stored —
+    // same contract as docs, so every model can read them (see lib/sheet.js).
+    const sheetAttachments = [];
+    for (const sheetFile of sheets) {
+      const invalid = validateSheetDataUrl(sheetFile?.dataUrl, sheetFile?.name);
+      if (invalid) return res.status(400).json({ error: invalid });
+      try {
+        const { text, sheetCount } = await extractSheetText(sheetFile.dataUrl, sheetFile.name);
+        sheetAttachments.push({
+          kind: 'sheet',
+          name: (sheetFile.name || 'spreadsheet.xlsx').slice(0, 200),
+          mimeType: 'text/markdown',
+          sheetCount,
+          textContent: text,
+        });
+      } catch (err) {
+        return res.status(400).json({ error: `Could not read "${sheetFile.name}" — ${err.message}` });
       }
     }
 
@@ -539,7 +569,7 @@ router.post('/:id/messages', async (req, res, next) => {
       // Skip if too large (MongoDB 16MB doc limit) — lightbox shows a notice.
       ...(p.dataUrl && p.dataUrl.length < 12_000_000 ? { dataUrl: p.dataUrl } : {}),
     }));
-    const attachments = [...imageAttachments, ...pdfAttachments, ...docAttachments];
+    const attachments = [...imageAttachments, ...pdfAttachments, ...docAttachments, ...sheetAttachments];
     const userMessage = await Message.create({
       conversationId: conversation._id,
       role: 'user',
@@ -550,7 +580,7 @@ router.post('/:id/messages', async (req, res, next) => {
     const messageCount = await Message.countDocuments({ conversationId: conversation._id });
     conversation.modelId = model.id;
     if (messageCount === 1)
-      conversation.title = (text || pdfAttachments[0]?.name || docAttachments[0]?.name || 'Image chat').slice(0, 60);
+      conversation.title = (text || pdfAttachments[0]?.name || docAttachments[0]?.name || sheetAttachments[0]?.name || 'Image chat').slice(0, 60);
     conversation.lastMessageAt = new Date();
     const senderIp = clientIp(req);
     if (senderIp) conversation.lastIp = senderIp;
@@ -695,7 +725,11 @@ router.post('/:id/messages', async (req, res, next) => {
           : m.artifactEdit?.instruction && idx < keepFullFrom
             ? summarizeArtifactFences(m.content)
             : m.content;
-        const imageAtts = (m.attachments || []).filter((a) => a.kind !== 'pdf');
+        // `kind === 'image'`, NOT `!== 'pdf'`. Only images carry a dataUrl —
+        // docs and sheets are stored as extracted text — so an allow-all-but-pdf
+        // filter sent `images: [null]` to the provider for every Word doc on a
+        // vision-capable model.
+        const imageAtts = (m.attachments || []).filter((a) => a.kind === 'image');
         const pdfText = pdfInjection(
           m.attachments,
           isLast ? PDF_CURRENT_MAX_CHARS : PDF_HISTORY_MAX_CHARS
@@ -704,7 +738,10 @@ router.post('/:id/messages', async (req, res, next) => {
           m.attachments,
           isLast ? DOC_CURRENT_MAX_CHARS : DOC_HISTORY_MAX_CHARS
         );
-        const injectedText = [pdfText, docText].filter(Boolean).join('\n\n');
+        // One stable cap, no isLast — a block that shrinks once it stops being
+        // the newest message would move the prompt bytes and drop the cache.
+        const sheetText = sheetInjection(m.attachments, SHEET_MAX_CHARS);
+        const injectedText = [pdfText, docText, sheetText].filter(Boolean).join('\n\n');
         const resolvedContent = injectedText
           ? `${baseContent}\n\n${injectedText}`.trim()
           : baseContent;
@@ -738,14 +775,20 @@ router.post('/:id/messages', async (req, res, next) => {
       // artifact (a question, or the repair call) re-reads it at the cache rate.
       // Recency also favours it: the instruction ends up last, where models follow
       // it best.
+      // Kept so the rewrite fallback can rebuild the same message. It is the
+      // user's words PLUS any PDF/doc text and vision description composed above —
+      // the fallback used to substitute the raw `text` here and silently drop all
+      // of that from the request.
+      let composedUserContent = null;
       if (patchMode) {
         const lastUser = providerMessages[providerMessages.length - 1];
+        composedUserContent = lastUser.content;
         lastUser.content = `${buildArtifactContext({
           code: liveArtifact.code,
           language: liveArtifact.language,
           title: liveArtifact.title,
           outline: renderArtifactMap(buildArtifactMap(liveArtifact.code)),
-        })}\n\n${lastUser.content}`.trim();
+        })}\n\n${composedUserContent}`.trim();
       }
 
       // End of the reusable prefix: everything up to and including the previous
@@ -828,10 +871,20 @@ router.post('/:id/messages', async (req, res, next) => {
       // path — and the model gets to see its own failed blocks.
       if (!applied.ok) {
         if (!clientGone) send({ type: 'status', content: "That edit didn't line up — trying once more…" });
+        // The repair re-sends providerMessages verbatim, so within this one turn
+        // the source is byte-identical — the single case where the whole artifact
+        // is genuinely cacheable. Moving the boundary onto the last of those
+        // messages is what lets Anthropic read it back at a tenth of the price
+        // instead of paying full price twice in the same turn (every
+        // OpenAI-compatible vendor already gets this automatically).
+        const repairPrefix = providerMessages.map((m, i) => ({
+          ...m,
+          cacheBoundary: i === providerMessages.length - 1,
+        }));
         const repair = await streamChat({
           model,
           messages: [
-            ...providerMessages,
+            ...repairPrefix,
             { role: 'assistant', content: chatResult.content },
             { role: 'user', content: buildRepairPrompt(describeFailures(applied.failures, parsed.problems)) },
           ],
@@ -861,14 +914,25 @@ router.post('/:id/messages', async (req, res, next) => {
         }
         // Re-frame the source: this call must ask for the whole document, so the
         // "change it with edit blocks, do not reproduce it" instruction has to go.
+        //
+        // Built in the SAME order as the first call, and from the same composed
+        // content, for two reasons. The instruction is the only thing that differs
+        // and it sits after the source, so this call still shares the whole
+        // ~5k-token source as a cached prefix instead of re-billing it at full
+        // price on the most expensive path in the app. And using
+        // `composedUserContent` rather than the raw `text` keeps the PDF/doc text
+        // and the vision model's file description in the request — substituting
+        // `text` dropped them, so a fallback on a chat with attachments asked the
+        // model to rewrite a document while withholding what it was about.
         const rewriteMessages = providerMessages.slice(0, -1).concat({
           ...providerMessages[providerMessages.length - 1],
-          content: `${text}\n\n${buildArtifactContext({
+          content: `${buildArtifactContext({
             code: liveArtifact.code,
             language: liveArtifact.language,
             title: liveArtifact.title,
+            outline: renderArtifactMap(buildArtifactMap(liveArtifact.code)),
             rewrite: true,
-          })}`.trim(),
+          })}\n\n${composedUserContent}`.trim(),
         });
         const rewrite = await streamChat({
           model,

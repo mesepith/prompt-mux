@@ -357,13 +357,18 @@ export const useStore = create((set, get) => ({
     const MAX_IMAGES = 4;
     const MAX_PDFS = 2;
     const MAX_DOCS = 2;
+    const MAX_SHEETS = 2;
     const MAX_IMAGE_MB = 5;
     const MAX_PDF_MB = 8;
     const MAX_DOC_MB = 8;
+    // Lower than docs on purpose: the server streams spreadsheets rather than
+    // loading the workbook, but the base64 payload is still resident.
+    const MAX_SHEET_MB = 5;
     set({ attachError: null });
     let imgRoom = MAX_IMAGES - get().attachments.filter((a) => a.kind === 'image').length;
     let pdfRoom = MAX_PDFS - get().attachments.filter((a) => a.kind === 'pdf').length;
     let docRoom = MAX_DOCS - get().attachments.filter((a) => a.kind === 'doc').length;
+    let sheetRoom = MAX_SHEETS - get().attachments.filter((a) => a.kind === 'sheet').length;
     const fail = (msg) => set({ attachError: msg });
 
     for (const file of files) {
@@ -371,11 +376,24 @@ export const useStore = create((set, get) => ({
       const isDocx = file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || /\.docx$/i.test(file.name);
       const isDoc = file.type === 'application/msword' || /\.doc$/i.test(file.name);
       const isImage = file.type.startsWith('image/');
-      if (!isPdf && !isDocx && !isDoc && !isImage) {
-        fail('Only images, PDFs and Word docs (.doc/.docx) are supported');
+      const isSheet = /\.(xlsx|xlsm|csv|tsv)$/i.test(file.name)
+        || file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        || file.type === 'text/csv';
+      // Legacy .xls needs a parser we deliberately do not ship — say so plainly
+      // rather than letting the server reject it after the upload.
+      if (/\.xls$/i.test(file.name) || file.type === 'application/vnd.ms-excel') {
+        fail(`"${file.name}" is a legacy .xls — please re-save it as .xlsx`);
         continue;
       }
-      if (isDocx || isDoc) {
+      if (!isPdf && !isDocx && !isDoc && !isImage && !isSheet) {
+        fail('Only images, PDFs, Word docs and spreadsheets (.xlsx/.csv) are supported');
+        continue;
+      }
+      if (isSheet) {
+        if (sheetRoom <= 0) { fail(`Max ${MAX_SHEETS} spreadsheets per message`); continue; }
+        if (file.size > MAX_SHEET_MB * 1024 * 1024) { fail(`"${file.name}" is over ${MAX_SHEET_MB} MB`); continue; }
+        sheetRoom -= 1;
+      } else if (isDocx || isDoc) {
         if (docRoom <= 0) { fail(`Max ${MAX_DOCS} documents per message`); continue; }
         if (file.size > MAX_DOC_MB * 1024 * 1024) { fail(`"${file.name}" is over ${MAX_DOC_MB} MB`); continue; }
         docRoom -= 1;
@@ -388,7 +406,7 @@ export const useStore = create((set, get) => ({
         if (file.size > MAX_IMAGE_MB * 1024 * 1024) { fail(`"${file.name}" is over ${MAX_IMAGE_MB} MB`); continue; }
         imgRoom -= 1;
       }
-      const kind = isDocx || isDoc ? 'doc' : isPdf ? 'pdf' : 'image';
+      const kind = isSheet ? 'sheet' : isDocx || isDoc ? 'doc' : isPdf ? 'pdf' : 'image';
       const reader = new FileReader();
       reader.onload = () =>
         set((s) => ({
@@ -597,6 +615,9 @@ export const useStore = create((set, get) => ({
           .map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
         docs: attachments
           .filter((a) => a.kind === 'doc')
+          .map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
+        sheets: attachments
+          .filter((a) => a.kind === 'sheet')
           .map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
         signal: controller.signal,
         onEvent: (ev) => {

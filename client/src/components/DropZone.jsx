@@ -1,16 +1,57 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CloudUpload, FileText, Image as ImageIcon } from 'lucide-react';
 import { useStore } from '../store/useStore.js';
 
 /**
- * Drag-and-drop file upload over the whole chat column.
- * Shows an overlay while files are dragged over; drops go into the shared
- * attachments store (same pipeline as the paperclip button).
+ * Drag-and-drop AND paste file upload over the whole chat column.
+ * Shows an overlay while files are dragged over; drops and pastes go into the
+ * shared attachments store (same pipeline as the paperclip button).
  */
 export default function DropZone({ children }) {
   const { addAttachments, streaming } = useStore();
   const [dragging, setDragging] = useState(false);
+  const [pasted, setPasted] = useState(0); // bumped to flash a confirmation
   const depth = useRef(0);
+
+  /**
+   * Paste-to-attach: ⌘V a screenshot, or a file copied from Finder/Explorer.
+   *
+   * Listens on the document rather than the textarea because the usual flow is
+   * "take a screenshot, hit paste" with focus nowhere in particular. Two rules
+   * keep it out of the way: only act when the clipboard actually carries FILES
+   * (pasting text, or a copied cell range from Excel, must paste normally), and
+   * never call preventDefault otherwise. `clipboardData.files` is empty for a
+   * pure text paste, so that check is the whole guard.
+   */
+  useEffect(() => {
+    const onPaste = (e) => {
+      if (streaming) return;
+      const files = [...(e.clipboardData?.files || [])];
+      if (!files.length) return;
+      e.preventDefault();
+      // A pasted screenshot has no filename in most browsers; give it one so the
+      // chip and the stored attachment aren't blank.
+      addAttachments(
+        files.map((f) =>
+          f.name
+            ? f
+            : new File([f], `pasted-image.${(f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`, {
+                type: f.type,
+              })
+        )
+      );
+      setPasted((n) => n + 1);
+    };
+    document.addEventListener('paste', onPaste);
+    return () => document.removeEventListener('paste', onPaste);
+  }, [addAttachments, streaming]);
+
+  // Flash the "attached" toast for a moment, then clear it.
+  useEffect(() => {
+    if (!pasted) return undefined;
+    const timer = setTimeout(() => setPasted(0), 1600);
+    return () => clearTimeout(timer);
+  }, [pasted]);
 
   const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 
@@ -45,6 +86,15 @@ export default function DropZone({ children }) {
       onDrop={onDrop}
     >
       {children}
+
+      {pasted > 0 && !dragging && (
+        <div className="pointer-events-none absolute inset-x-0 top-3 z-50 flex justify-center animate-fade-in">
+          <span className="flex items-center gap-2 rounded-full border border-emerald-400/30 bg-surface-950/90 px-3 py-1.5 text-[11px] font-medium text-emerald-300 shadow-lg backdrop-blur">
+            <CloudUpload size={12} />
+            Pasted — attached below
+          </span>
+        </div>
+      )}
 
       {dragging && (
         <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-none bg-surface-950/80 backdrop-blur-sm animate-fade-in">

@@ -1,4 +1,4 @@
-import { AlertTriangle, FileText, FileType, MousePointerClick, Play } from 'lucide-react';
+import { AlertTriangle, FileText, FileType, MousePointerClick, Play, Table2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store/useStore.js';
 import { extractArtifacts } from '../lib/artifacts.js';
@@ -71,6 +71,31 @@ export default function MessageBubble({ message, isStreaming = false }) {
                         <span className="block text-[11px] text-zinc-500">
                           PDF{a.pageCount ? ` · ${a.pageCount} page${a.pageCount === 1 ? '' : 's'}` : ''}
                           {` · ${state.label}`}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                }
+                if (a.kind === 'sheet') {
+                  return (
+                    <button
+                      type="button"
+                      key={i}
+                      onClick={() => openAttachment(a)}
+                      className="flex cursor-pointer items-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.05] px-3.5 py-2.5 transition-colors hover:border-emerald-500/40 hover:bg-white/[0.08]"
+                      title="Spreadsheet — click to see the text the model was given"
+                    >
+                      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-emerald-500/15">
+                        <Table2 size={16} className="text-emerald-400" />
+                      </span>
+                      <span>
+                        <span className="block max-w-[200px] truncate text-sm font-medium text-zinc-200">
+                          {a.name || 'spreadsheet.xlsx'}
+                        </span>
+                        <span className="block text-[11px] text-zinc-500">
+                          Spreadsheet
+                          {a.sheetCount ? ` · ${a.sheetCount} sheet${a.sheetCount === 1 ? '' : 's'}` : ''}
+                          {' · converted to text'}
                         </span>
                       </span>
                     </button>
